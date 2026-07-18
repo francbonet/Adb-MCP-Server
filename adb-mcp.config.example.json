@@ -1,0 +1,23 @@
+{
+  "projectRoot": "../MyAndroidTvApp",
+  "profiles": [
+    {
+      "name": "debug",
+      "description": "Build the debug APK with Gradle",
+      "executable": "./gradlew",
+      "args": ["app:assembleDebug"],
+      "cwd": ".",
+      "artifactPath": "app/build/outputs/apk/debug/app-debug.apk",
+      "timeoutMs": 600000
+    },
+    {
+      "name": "release",
+      "description": "Build the release APK with Gradle",
+      "executable": "./gradlew",
+      "args": ["app:assembleRelease"],
+      "cwd": ".",
+      "artifactPath": "app/build/outputs/apk/release/app-release.apk",
+      "timeoutMs": 900000
+    }
+  ]
+}
