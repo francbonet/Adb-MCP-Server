@@ -1,4 +1,6 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { realpath, stat } from "node:fs/promises";
+import path from "node:path";
 import {
   CallToolRequestSchema,
   ErrorCode,
@@ -50,6 +52,7 @@ type KeyEventName = keyof typeof KEY_EVENTS;
 
 export interface SessionState {
   activeSerial?: string;
+  projectRoot?: string;
 }
 
 export interface ServerDependencies {
@@ -161,6 +164,24 @@ function optionalString(args: Record<string, unknown>, key: string): string | un
   return value;
 }
 
+async function resolveProjectRoot(projectPath: string): Promise<string> {
+  const requested = projectPath.trim();
+  if (!path.isAbsolute(requested)) {
+    throw new AdbCommandError("project_path must be an absolute path on the MCP server machine");
+  }
+  let resolved: string;
+  try {
+    resolved = await realpath(requested);
+  } catch {
+    throw new AdbCommandError(`Project path does not exist: ${requested}`);
+  }
+  const projectStat = await stat(resolved);
+  if (!projectStat.isDirectory()) {
+    throw new AdbCommandError(`Project path must point to a directory: ${resolved}`);
+  }
+  return resolved;
+}
+
 function requiredEnum<T extends string>(
   args: Record<string, unknown>,
   key: string,
@@ -222,7 +243,7 @@ export function createAdbMcpServer(
     {
       capabilities: { tools: {}, resources: {} },
       instructions:
-        "Use list_devices before interacting when device context is unclear. Use list_avds and start_emulator when an Android Emulator must be started. Select the intended emulator or physical device explicitly when more than one is connected. Prefer screenshot and dump_ui to inspect state, then use concrete navigation tools. Never assume an install, uninstall, launch, tap, key press, or recording succeeded: inspect the resulting state afterwards. Use get_logcat around failures to provide diagnostic context.",
+        "Use set_project_root with the user-confirmed repository path before installing an APK from a project other than the configured default. Use list_devices before interacting when device context is unclear. Use list_avds and start_emulator when an Android Emulator must be started. Select the intended emulator or physical device explicitly when more than one is connected. Prefer screenshot and dump_ui to inspect state, then use concrete navigation tools. Never assume an install, uninstall, launch, tap, key press, or recording succeeded: inspect the resulting state afterwards. Use get_logcat around failures to provide diagnostic context.",
     }
   );
 
@@ -340,6 +361,22 @@ export function createAdbMcpServer(
         annotations: { readOnlyHint: true, openWorldHint: false },
       },
       {
+        name: "set_project_root",
+        description:
+          "Set the user-confirmed repository root for this MCP session. install_apk will only accept APKs contained within this directory.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            project_path: {
+              type: "string",
+              description: "Absolute path to an existing project directory on the MCP server machine",
+            },
+          },
+          required: ["project_path"],
+        },
+        annotations: { readOnlyHint: true, openWorldHint: false },
+      },
+      {
         name: "get_device_info",
         description:
           "Read model, manufacturer, Android version, SDK, screen size/density, and whether the target reports itself as an emulator.",
@@ -423,7 +460,7 @@ export function createAdbMcpServer(
       {
         name: "install_apk",
         description:
-          "Install an APK from the configured ADB_APK_ROOT on an emulator or physical device.",
+          "Install an APK contained within the active session project root, or the configured ADB_APK_ROOT when no session root is set.",
         inputSchema: {
           type: "object",
           properties: {
@@ -643,6 +680,13 @@ export function createAdbMcpServer(
           state.activeSerial = undefined;
           return textResult(previous ? `Cleared active device ${previous}.` : "No active device was set.");
         }
+        case "set_project_root": {
+          const projectRoot = await resolveProjectRoot(requiredString(args, "project_path"));
+          state.projectRoot = projectRoot;
+          return textResult(
+            `Active project root set to ${projectRoot}. install_apk is now restricted to APKs inside this directory for this MCP session.`
+          );
+        }
         case "get_device_info": {
           const serial = await resolveDevice(adb, state, optionalString(args, "device_serial"));
           const [propertyOutput, size, density] = await Promise.all([
@@ -745,14 +789,17 @@ export function createAdbMcpServer(
         }
         case "install_apk": {
           const serial = await resolveDevice(adb, state, optionalString(args, "device_serial"));
-          const apkPath = await resolveApkPath(requiredString(args, "apk_path"), apkRoot);
+          const activeApkRoot = state.projectRoot ?? apkRoot;
+          const apkPath = await resolveApkPath(requiredString(args, "apk_path"), activeApkRoot);
           const installArgs = ["install"];
           if (args.replace !== false) installArgs.push("-r");
           if (args.allow_test !== false) installArgs.push("-t");
           if (args.grant_permissions === true) installArgs.push("-g");
           installArgs.push(apkPath);
           const output = await adb.text(installArgs, { serial, timeoutMs: 180_000 });
-          return textResult(`${output || "APK installed successfully."}\nDevice: ${serial}\nAPK: ${apkPath}`);
+          return textResult(
+            `${output || "APK installed successfully."}\nDevice: ${serial}\nProject root: ${activeApkRoot}\nAPK: ${apkPath}`
+          );
         }
         case "uninstall_app": {
           const serial = await resolveDevice(adb, state, optionalString(args, "device_serial"));

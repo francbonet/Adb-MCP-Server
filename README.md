@@ -164,6 +164,7 @@ Restart Claude Desktop after saving the file. In a conversation, open the connec
 - `start_emulator`: start an AVD with quick or cold boot and select it as the active device.
 - `connect_device` / `disconnect_device`: manage ADB-over-TCP targets.
 - `select_device` / `clear_active_device`: set session device context.
+- `set_project_root`: set the user-confirmed repository root for this MCP session.
 - `get_device_info`: read device model, Android version, screen size, density, and build info.
 - `screenshot`: capture and optimize a PNG screenshot for agent analysis.
 - `dump_ui`: return UI Automator XML when supported by the target.
@@ -279,7 +280,17 @@ ADB itself is not an OBS video source. Protected DRM/HDCP content may appear bla
 
 ## Installing and uninstalling applications
 
-`install_apk` installs an APK located inside the configured `ADB_APK_ROOT`. It supports replacing an existing application, installing test-only APKs, and granting runtime permissions:
+`set_project_root` sets the user-confirmed repository root for the active MCP session. After it is set, `install_apk` only accepts APK paths contained inside that directory:
+
+```json
+{
+  "project_path": "/absolute/path/to/MyAndroidTvApp"
+}
+```
+
+Use this when the agent is working in a different app repository from the MCP server's configured default root.
+
+`install_apk` installs an APK located inside the active session project root, or inside the configured `ADB_APK_ROOT` when no session project root is set. It supports replacing an existing application, installing test-only APKs, and granting runtime permissions:
 
 ```json
 {
@@ -301,7 +312,7 @@ ADB itself is not an OBS video source. Protected DRM/HDCP content may appear bla
 }
 ```
 
-The `device_serial` field is optional for both tools. When omitted, the active device is used, or the only ready device is selected automatically.
+The `device_serial` field is optional for install and uninstall operations. When omitted, the active device is used, or the only ready device is selected automatically.
 
 By default, `uninstall_app` removes the application and its data. Set `keep_data` to `true` to retain its data and cache directories using `adb uninstall -k`. Package names are validated before invoking ADB, and the tool only reports success when ADB explicitly returns `Success`.
 
