@@ -4,6 +4,159 @@ MCP server for controlling Android, Fire TV, and Android TV devices through ADB.
 
 The intended setup is a local machine in the office, for example a Mac Mini with Android emulators or physical Fire TV devices. A remote agent can start an AVD, inspect and control the selected device, install and uninstall applications, capture optimized screenshots, record evidence through OBS, and collect logcat context around failures.
 
+## Installation
+
+This server uses the MCP stdio transport. Build it once, then configure each MCP client to start `dist/index.js` with Node.js.
+
+Prerequisites:
+
+- Node.js `18.17` or newer.
+- ADB installed and able to see the intended devices.
+- Android Emulator installed when using `list_avds` or `start_emulator`.
+- OBS Studio 28 or newer when using the OBS recording tools.
+
+Prepare the server:
+
+```bash
+git clone <repo-url> adb-mcp-server
+cd adb-mcp-server
+npm install
+npm run build
+```
+
+Find the absolute paths you will need in desktop apps:
+
+```bash
+pwd
+which node
+which adb
+```
+
+Use absolute paths for desktop clients. On macOS, GUI apps often do not inherit your shell `PATH`, so `node`, `adb`, the Android Emulator, or OBS may not be found unless you configure explicit paths.
+
+### OpenAI Codex CLI, IDE extension, and ChatGPT desktop app
+
+Codex CLI, the Codex IDE extension, and the ChatGPT desktop app share Codex MCP configuration through `config.toml`. You can add the server with the CLI:
+
+```bash
+codex mcp add adb \
+  --env ADB_EXECUTABLE=/absolute/path/to/adb \
+  -- /absolute/path/to/node /absolute/path/to/adb-mcp-server/dist/index.js
+```
+
+Then verify it:
+
+```bash
+codex mcp list
+```
+
+For explicit configuration, edit `~/.codex/config.toml` or a trusted project-scoped `.codex/config.toml`:
+
+```toml
+[mcp_servers.adb]
+command = "/absolute/path/to/node"
+args = ["/absolute/path/to/adb-mcp-server/dist/index.js"]
+startup_timeout_sec = 20
+tool_timeout_sec = 300
+
+[mcp_servers.adb.env]
+ADB_EXECUTABLE = "/absolute/path/to/adb"
+ADB_PROJECT_ROOT = "/absolute/path/to/android-project"
+ADB_APK_ROOT = "/absolute/path/to/android-project"
+ANDROID_EMULATOR_EXECUTABLE = "/absolute/path/to/emulator"
+ADB_ALLOWED_AVDS = "Television_1080p_API_34"
+```
+
+Optional OBS variables can be added to the same `env` table:
+
+```toml
+# Add these under [mcp_servers.adb.env] when OBS recording is needed.
+OBS_EXECUTABLE = "/Applications/OBS.app"
+OBS_WEBSOCKET_URL = "ws://127.0.0.1:4455"
+OBS_WEBSOCKET_PASSWORD = "replace-with-the-local-password"
+OBS_EMULATOR_SCENE = "Android Emulator"
+OBS_EMULATOR_SOURCE = "Android Emulator Capture"
+OBS_PHYSICAL_DEVICE_SCENE = "Physical Device - HDMI"
+OBS_PHYSICAL_DEVICE_SOURCE = "Capture Card"
+```
+
+In the Codex TUI, use `/mcp` to inspect connected servers. In the Codex IDE extension or ChatGPT desktop app, open settings, add an MCP server, choose STDIO, and use the same command, args, and environment values shown above.
+
+ChatGPT web does not read local Codex MCP configuration. To use this local stdio server with OpenAI clients, use Codex CLI, the IDE extension, or the ChatGPT desktop app on the machine that has ADB access.
+
+### Claude Code
+
+Claude Code can install this server as a local stdio MCP server:
+
+```bash
+claude mcp add --scope user --transport stdio \
+  --env ADB_EXECUTABLE=/absolute/path/to/adb \
+  --env ADB_PROJECT_ROOT=/absolute/path/to/android-project \
+  --env ADB_APK_ROOT=/absolute/path/to/android-project \
+  adb \
+  -- /absolute/path/to/node /absolute/path/to/adb-mcp-server/dist/index.js
+```
+
+Use `--scope user` to make it available in all your Claude Code projects. Use `--scope local` for only the current project, or `--scope project` to create a shared `.mcp.json` in the repository.
+
+Manage and verify the server:
+
+```bash
+claude mcp list
+claude mcp get adb
+```
+
+Inside Claude Code, use `/mcp` to inspect server status and approve or authenticate servers when needed.
+
+Project-scoped Claude Code configuration can also be committed as `.mcp.json`, but avoid hard-coding machine-specific absolute paths in shared repositories unless every developer uses the same layout:
+
+```json
+{
+  "mcpServers": {
+    "adb": {
+      "command": "/absolute/path/to/node",
+      "args": ["/absolute/path/to/adb-mcp-server/dist/index.js"],
+      "env": {
+        "ADB_EXECUTABLE": "/absolute/path/to/adb",
+        "ADB_PROJECT_ROOT": "/absolute/path/to/android-project",
+        "ADB_APK_ROOT": "/absolute/path/to/android-project"
+      },
+      "timeout": 300000
+    }
+  }
+}
+```
+
+### Claude Desktop
+
+Claude Desktop supports local MCP servers through desktop extensions and through manual JSON configuration. This repository does not currently ship a `.mcpb` desktop extension, so use manual configuration.
+
+Open Claude Desktop settings, go to the Developer section, and edit `claude_desktop_config.json`. Common locations:
+
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+
+Add this server:
+
+```json
+{
+  "mcpServers": {
+    "adb": {
+      "command": "/absolute/path/to/node",
+      "args": ["/absolute/path/to/adb-mcp-server/dist/index.js"],
+      "env": {
+        "ADB_EXECUTABLE": "/absolute/path/to/adb",
+        "ADB_PROJECT_ROOT": "/absolute/path/to/android-project",
+        "ADB_APK_ROOT": "/absolute/path/to/android-project",
+        "ANDROID_EMULATOR_EXECUTABLE": "/absolute/path/to/emulator"
+      }
+    }
+  }
+}
+```
+
+Restart Claude Desktop after saving the file. In a conversation, open the connectors/tools menu and confirm the `adb` server is connected.
+
 ## Tools
 
 - `list_devices`: list ADB-visible devices.
@@ -215,11 +368,5 @@ Environment variables:
 ```bash
 npm install
 npm run build
-npm start
-```
-
-Configure your MCP client to run:
-
-```bash
-node /absolute/path/to/adb-mcp-server/dist/index.js
+npm test
 ```
