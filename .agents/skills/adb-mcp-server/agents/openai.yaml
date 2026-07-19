@@ -1,0 +1,4 @@
+interface:
+  display_name: "ADB MCP Server"
+  short_description: "Operate Android devices through ADB MCP"
+  default_prompt: "Use $adb-mcp-server to inspect devices, install APKs, capture screenshots, and gather Android diagnostics safely."

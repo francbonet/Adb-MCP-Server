@@ -84,6 +84,27 @@ In the Codex TUI, use `/mcp` to inspect connected servers. In the Codex IDE exte
 
 ChatGPT web does not read local Codex MCP configuration. To use this local stdio server with OpenAI clients, use Codex CLI, the IDE extension, or the ChatGPT desktop app on the machine that has ADB access.
 
+### Codex usage skill
+
+This repository includes a Codex skill template at `.agents/skills/adb-mcp-server`. The MCP server can be configured globally, but the skill should be installed in the app repository where Codex is doing the Android work.
+
+From this MCP server repository, copy the skill into the target app repository:
+
+```bash
+mkdir -p /absolute/path/to/android-project/.agents/skills
+cp -R .agents/skills/adb-mcp-server /absolute/path/to/android-project/.agents/skills/
+```
+
+Then commit it in the target repository:
+
+```bash
+cd /absolute/path/to/android-project
+git add .agents/skills/adb-mcp-server
+git commit -m "docs: add ADB MCP usage skill"
+```
+
+Use a repo-local skill when the workflow should be shared with the team. For a personal skill available across all repositories, copy the same folder to `~/.agents/skills/adb-mcp-server` instead.
+
 ### Claude Code
 
 Claude Code can install this server as a local stdio MCP server:
