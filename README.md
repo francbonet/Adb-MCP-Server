@@ -84,18 +84,18 @@ In the Codex TUI, use `/mcp` to inspect connected servers. In the Codex IDE exte
 
 ChatGPT web does not read local Codex MCP configuration. To use this local stdio server with OpenAI clients, use Codex CLI, the IDE extension, or the ChatGPT desktop app on the machine that has ADB access.
 
-### Codex usage skill
+### Usage skills
 
-This repository includes a Codex skill template at `.agents/skills/adb-mcp-server`. The MCP server can be configured globally, but the skill should be installed in the app repository where Codex is doing the Android work.
+This repository includes a Codex/OpenAI skill template at `.agents/skills/adb-mcp-server`. The MCP server can be configured globally, but the skill should be installed in the app repository where the agent is doing the Android work.
 
-From this MCP server repository, copy the skill into the target app repository:
+For OpenAI Codex, Codex IDE extension, and ChatGPT desktop app, install it as a repo-local skill under `.agents/skills`:
 
 ```bash
 mkdir -p /absolute/path/to/android-project/.agents/skills
 cp -R .agents/skills/adb-mcp-server /absolute/path/to/android-project/.agents/skills/
 ```
 
-Then commit it in the target repository:
+Then commit it in the target repository so the team gets the same workflow:
 
 ```bash
 cd /absolute/path/to/android-project
@@ -103,7 +103,34 @@ git add .agents/skills/adb-mcp-server
 git commit -m "docs: add ADB MCP usage skill"
 ```
 
-Use a repo-local skill when the workflow should be shared with the team. For a personal skill available across all repositories, copy the same folder to `~/.agents/skills/adb-mcp-server` instead.
+For a personal Codex/OpenAI skill available across all repositories, copy the same folder to `~/.agents/skills/adb-mcp-server` instead:
+
+```bash
+mkdir -p ~/.agents/skills
+cp -R .agents/skills/adb-mcp-server ~/.agents/skills/
+```
+
+For Claude Code, install the same instructions as a Claude project skill under `.claude/skills`:
+
+```bash
+mkdir -p /absolute/path/to/android-project/.claude/skills/adb-mcp-server
+cp .agents/skills/adb-mcp-server/SKILL.md /absolute/path/to/android-project/.claude/skills/adb-mcp-server/SKILL.md
+```
+
+Then commit it in the target repository:
+
+```bash
+cd /absolute/path/to/android-project
+git add .claude/skills/adb-mcp-server/SKILL.md
+git commit -m "docs: add ADB MCP Claude skill"
+```
+
+For a personal Claude Code skill available across all repositories, copy it to `~/.claude/skills/adb-mcp-server/SKILL.md` instead:
+
+```bash
+mkdir -p ~/.claude/skills/adb-mcp-server
+cp .agents/skills/adb-mcp-server/SKILL.md ~/.claude/skills/adb-mcp-server/SKILL.md
+```
 
 ### Claude Code
 
