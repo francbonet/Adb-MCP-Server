@@ -19,6 +19,9 @@ import {
   resolveApkPath,
 } from "./adb.js";
 import { BuildCommandError, BuildRunner } from "./build.js";
+import { EmulatorManager } from "./emulator.js";
+import { ObsController, ObsTarget } from "./obs.js";
+import { optimizeScreenshot } from "./screenshot.js";
 
 const DEVICE_CATALOG_URI = "adb://devices";
 const KEY_EVENTS = {
@@ -53,6 +56,11 @@ export interface ServerDependencies {
   adb: AdbClient;
   apkRoot: string;
   screenshotMaxBytes: number;
+  screenshotOutputMaxBytes: number;
+  screenshotMaxWidth: number;
+  screenshotMaxHeight: number;
+  emulatorManager?: EmulatorManager;
+  obsController?: ObsController;
   buildRunner?: BuildRunner;
 }
 
@@ -153,6 +161,18 @@ function optionalString(args: Record<string, unknown>, key: string): string | un
   return value;
 }
 
+function requiredEnum<T extends string>(
+  args: Record<string, unknown>,
+  key: string,
+  values: readonly T[]
+): T {
+  const value = requiredString(args, key);
+  if (!values.includes(value as T)) {
+    throw new AdbCommandError(`${key} must be one of: ${values.join(", ")}`);
+  }
+  return value as T;
+}
+
 function boundedInteger(
   args: Record<string, unknown>,
   key: string,
@@ -186,13 +206,23 @@ export function createAdbMcpServer(
   dependencies: ServerDependencies,
   state: SessionState = {}
 ): Server {
-  const { adb, apkRoot, screenshotMaxBytes, buildRunner } = dependencies;
+  const {
+    adb,
+    apkRoot,
+    screenshotMaxBytes,
+    screenshotOutputMaxBytes,
+    screenshotMaxWidth,
+    screenshotMaxHeight,
+    emulatorManager,
+    obsController,
+    buildRunner,
+  } = dependencies;
   const server = new Server(
     { name: "adb-mcp-server", version: "0.1.0" },
     {
       capabilities: { tools: {}, resources: {} },
       instructions:
-        "Use list_devices before interacting when device context is unclear. Select the intended emulator or physical device explicitly when more than one is connected. Prefer screenshot and dump_ui to inspect state, then use concrete navigation tools. Never assume an install, uninstall, launch, tap, or key press succeeded: inspect the screen or current activity afterwards. Use get_logcat around failures to provide diagnostic context.",
+        "Use list_devices before interacting when device context is unclear. Use list_avds and start_emulator when an Android Emulator must be started. Select the intended emulator or physical device explicitly when more than one is connected. Prefer screenshot and dump_ui to inspect state, then use concrete navigation tools. Never assume an install, uninstall, launch, tap, key press, or recording succeeded: inspect the resulting state afterwards. Use get_logcat around failures to provide diagnostic context.",
     }
   );
 
@@ -235,6 +265,37 @@ export function createAdbMcpServer(
           "List Android emulators, USB devices, and network-connected devices visible to ADB, including authorization state.",
         inputSchema: { type: "object", properties: {} },
         annotations: { readOnlyHint: true, openWorldHint: false },
+      },
+      {
+        name: "list_avds",
+        description: "List configured Android Virtual Devices and report which ones are currently running.",
+        inputSchema: { type: "object", properties: {} },
+        annotations: { readOnlyHint: true, openWorldHint: false },
+      },
+      {
+        name: "start_emulator",
+        description:
+          "Start an Android Virtual Device with quick or cold boot, wait for Android to finish booting, and select it as active.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            avd_name: { type: "string", description: "AVD name returned by list_avds" },
+            boot_mode: {
+              type: "string",
+              enum: ["quick", "cold"],
+              default: "cold",
+              description: "Use cold to skip loading snapshots; quick allows the emulator to restore one",
+            },
+            headless: {
+              type: "boolean",
+              default: false,
+              description: "Start without a window. Keep false when OBS needs to capture the emulator window.",
+            },
+            timeout_ms: { type: "integer", minimum: 30_000, maximum: 600_000, default: 180_000 },
+          },
+          required: ["avd_name"],
+        },
+        annotations: { readOnlyHint: false, openWorldHint: false },
       },
       {
         name: "connect_device",
@@ -287,7 +348,8 @@ export function createAdbMcpServer(
       },
       {
         name: "screenshot",
-        description: "Capture the current screen as a PNG image and return it directly to the agent.",
+        description:
+          "Capture the current screen, resize and compress it as an analysis-friendly PNG, and return it directly to the agent.",
         inputSchema: { type: "object", properties: { device_serial: deviceInputSchema } },
         annotations: { readOnlyHint: true, openWorldHint: false },
       },
@@ -441,6 +503,49 @@ export function createAdbMcpServer(
         annotations: { readOnlyHint: true, openWorldHint: false },
       },
       {
+        name: "get_obs_status",
+        description: "Report whether OBS WebSocket is reachable and whether OBS is currently recording.",
+        inputSchema: { type: "object", properties: {} },
+        annotations: { readOnlyHint: true, openWorldHint: false },
+      },
+      {
+        name: "open_obs",
+        description: "Open OBS if necessary and optionally select the configured emulator or physical-device scene.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            target: { type: "string", enum: ["emulator", "physical_device"] },
+            timeout_ms: { type: "integer", minimum: 5_000, maximum: 120_000, default: 30_000 },
+          },
+        },
+        annotations: { readOnlyHint: false, openWorldHint: false },
+      },
+      {
+        name: "start_obs_recording",
+        description:
+          "Select and verify the configured OBS source for an emulator or physical device, then start recording.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            target: { type: "string", enum: ["emulator", "physical_device"] },
+            avd_name: {
+              type: "string",
+              description: "For emulator targets, match the OBS window/application property to this AVD when provided",
+            },
+            launch_if_needed: { type: "boolean", default: true },
+            timeout_ms: { type: "integer", minimum: 5_000, maximum: 120_000, default: 30_000 },
+          },
+          required: ["target"],
+        },
+        annotations: { readOnlyHint: false, openWorldHint: false },
+      },
+      {
+        name: "stop_obs_recording",
+        description: "Stop and finalize the current OBS recording, returning the saved video path.",
+        inputSchema: { type: "object", properties: {} },
+        annotations: { readOnlyHint: false, openWorldHint: false },
+      },
+      {
         name: "list_build_profiles",
         description:
           "List the server-side build profiles that this MCP instance is allowed to execute, such as debug or release.",
@@ -478,6 +583,42 @@ export function createAdbMcpServer(
         case "list_devices": {
           const devices = await adb.listDevices();
           return textResult(renderDeviceCatalog(devices, state.activeSerial));
+        }
+        case "list_avds": {
+          if (!emulatorManager) throw new AdbCommandError("Android Emulator support is not configured");
+          const avds = await emulatorManager.listAvds();
+          return textResult(
+            avds.length
+              ? JSON.stringify({ avds }, null, 2)
+              : "No allowed Android Virtual Devices were reported by the emulator executable."
+          );
+        }
+        case "start_emulator": {
+          if (!emulatorManager) throw new AdbCommandError("Android Emulator support is not configured");
+          const bootMode =
+            args.boot_mode === undefined
+              ? "cold"
+              : requiredEnum(args, "boot_mode", ["quick", "cold"] as const);
+          const timeout = boundedInteger(args, "timeout_ms", 30_000, 600_000, 180_000);
+          const result = await emulatorManager.start({
+            avdName: requiredString(args, "avd_name"),
+            bootMode,
+            headless: args.headless === true,
+            timeoutMs: timeout,
+          });
+          state.activeSerial = result.serial;
+          return textResult(
+            [
+              result.alreadyRunning
+                ? `AVD ${result.avdName} was already running; no new ${bootMode} boot was performed.`
+                : `AVD ${result.avdName} started successfully with ${bootMode} boot.`,
+              `Active device: ${result.serial}`,
+              result.pid ? `Emulator PID: ${result.pid}` : undefined,
+              `Headless: ${result.headless}`,
+            ]
+              .filter(Boolean)
+              .join("\n")
+          );
         }
         case "connect_device": {
           const target = requiredString(args, "target");
@@ -531,13 +672,22 @@ export function createAdbMcpServer(
             serial,
             maxOutputBytes: screenshotMaxBytes,
           });
-          if (result.stdout.length < 8 || result.stdout.subarray(1, 4).toString("ascii") !== "PNG") {
-            throw new AdbCommandError("Device did not return a valid PNG screenshot");
-          }
+          const optimized = await optimizeScreenshot(result.stdout, {
+            maxBytes: screenshotOutputMaxBytes,
+            maxWidth: screenshotMaxWidth,
+            maxHeight: screenshotMaxHeight,
+          });
           return {
             content: [
-              { type: "text" as const, text: `Screenshot captured from ${serial}.` },
-              { type: "image" as const, data: result.stdout.toString("base64"), mimeType: "image/png" },
+              {
+                type: "text" as const,
+                text: [
+                  `Screenshot captured from ${serial}.`,
+                  `Original: ${optimized.originalWidth}x${optimized.originalHeight}, ${optimized.originalBytes} bytes.`,
+                  `Delivered: ${optimized.width}x${optimized.height}, ${optimized.data.length} bytes, PNG palette up to ${optimized.colours} colours.`,
+                ].join("\n"),
+              },
+              { type: "image" as const, data: optimized.data.toString("base64"), mimeType: "image/png" },
             ],
           };
         }
@@ -653,6 +803,44 @@ export function createAdbMcpServer(
             ? output.split(/\r?\n/).filter((line) => line.toLowerCase().includes(contains)).join("\n")
             : output;
           return textResult(filtered || "No matching logcat lines found.");
+        }
+        case "get_obs_status": {
+          if (!obsController) throw new AdbCommandError("OBS support is not configured");
+          return textResult(JSON.stringify(await obsController.status(), null, 2));
+        }
+        case "open_obs": {
+          if (!obsController) throw new AdbCommandError("OBS support is not configured");
+          const requestedTarget = optionalString(args, "target");
+          if (requestedTarget && !["emulator", "physical_device"].includes(requestedTarget)) {
+            throw new AdbCommandError("target must be one of: emulator, physical_device");
+          }
+          const timeout = boundedInteger(args, "timeout_ms", 5_000, 120_000, 30_000);
+          const status = await obsController.open(requestedTarget as ObsTarget | undefined, timeout);
+          return textResult(`OBS is ready.\n${JSON.stringify(status, null, 2)}`);
+        }
+        case "start_obs_recording": {
+          if (!obsController) throw new AdbCommandError("OBS support is not configured");
+          const target = requiredEnum(args, "target", ["emulator", "physical_device"] as const);
+          const avdName = optionalString(args, "avd_name");
+          if (target === "physical_device" && avdName) {
+            throw new AdbCommandError("avd_name can only be used when target is emulator");
+          }
+          const timeout = boundedInteger(args, "timeout_ms", 5_000, 120_000, 30_000);
+          const result = await obsController.startRecording(target, {
+            avdName,
+            launchIfNeeded: args.launch_if_needed !== false,
+            timeoutMs: timeout,
+          });
+          return textResult(
+            `${result.alreadyRecording ? "OBS was already recording." : "OBS recording started."}\n${JSON.stringify(result, null, 2)}`
+          );
+        }
+        case "stop_obs_recording": {
+          if (!obsController) throw new AdbCommandError("OBS support is not configured");
+          const result = await obsController.stopRecording();
+          return textResult(
+            `${result.stopped ? `OBS recording saved to ${result.outputPath}` : "OBS was not recording."}\n${JSON.stringify(result.status, null, 2)}`
+          );
         }
         case "list_build_profiles": {
           return textResult(renderBuildProfiles(buildRunner));
