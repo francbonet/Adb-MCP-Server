@@ -65,3 +65,16 @@ Record evidence with OBS:
 3. Call `start_obs_recording` with `target` and `avd_name` when recording an emulator.
 4. Reproduce the behavior.
 5. Call `stop_obs_recording` and report the output path.
+
+Run a test automation file:
+
+1. Read the test file from the active app repository and extract setup, actions, expected results, and evidence requirements.
+2. Call `set_project_root` with the app repository root before any APK install.
+3. Prepare the device: start or select the emulator/device, build/install the APK when requested, and launch the app.
+4. If the test requests video evidence, reproduction evidence, or OBS recording, call `get_obs_status`, then `open_obs` if needed, then `start_obs_recording` before the first user-visible test action.
+5. Execute each test step with the closest MCP tool. Verify after critical actions with `screenshot`, `dump_ui`, or `get_current_activity`.
+6. On failure, capture a screenshot, current activity, and focused `get_logcat` output before changing app state further.
+7. Stop OBS recording after the final verification step, or immediately after collecting failure evidence when the test cannot continue.
+8. Report pass/fail, device serial, app/package tested, screenshots or OBS output path, failed step if any, and the relevant logcat summary.
+
+When a test file does not explicitly request OBS, do not record by default. Prefer screenshots and logs unless video is needed to prove motion, playback, focus navigation, timing, or a visual regression.
