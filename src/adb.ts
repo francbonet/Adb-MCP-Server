@@ -93,6 +93,25 @@ export interface AdbDevice {
   transportId?: string;
 }
 
+export type DevicePlatform = "android" | "vega" | "unknown";
+
+export interface DeviceCapabilities {
+  hasDumpsys: boolean;
+  hasUiAutomator: boolean;
+  hasLogcat: boolean;
+  hasInput: boolean;
+  hasScreencap: boolean;
+  hasActivityManager: boolean;
+  hasMonkey: boolean;
+  hasGetprop: boolean;
+  hasWm: boolean;
+  platform: DevicePlatform;
+}
+
+export interface AdbDeviceWithCapabilities extends AdbDevice {
+  capabilities: DeviceCapabilities;
+}
+
 export interface AdbClientOptions {
   executable?: string;
   timeoutMs?: number;
@@ -105,6 +124,17 @@ const NETWORK_TARGET_PATTERN = /^(?:[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9
 const PACKAGE_PATTERN = /^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$/;
 const COMPONENT_PATTERN = /^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+\/(?:\.?[A-Za-z][A-Za-z0-9_.$]*|[A-Za-z][A-Za-z0-9_.$]*(?:\.[A-Za-z0-9_.$]+)*)$/;
 const SAFE_TEXT_PATTERN = /^[A-Za-z0-9 _.,@:/+\-=]*$/;
+const COMMAND_CAPABILITIES = {
+  hasDumpsys: "dumpsys",
+  hasUiAutomator: "uiautomator",
+  hasLogcat: "logcat",
+  hasInput: "input",
+  hasScreencap: "screencap",
+  hasActivityManager: "am",
+  hasMonkey: "monkey",
+  hasGetprop: "getprop",
+  hasWm: "wm",
+} as const satisfies Record<Exclude<keyof DeviceCapabilities, "platform">, string>;
 
 export function assertSerial(serial: string): string {
   const value = serial.trim();
@@ -205,6 +235,7 @@ export class AdbClient {
   private readonly timeoutMs: number;
   private readonly maxOutputBytes: number;
   private readonly runner: CommandRunner;
+  private readonly capabilitiesCache = new Map<string, DeviceCapabilities>();
 
   constructor(options: AdbClientOptions = {}) {
     this.executable = options.executable ?? "adb";
@@ -217,13 +248,7 @@ export class AdbClient {
     args: readonly string[],
     options: { serial?: string; timeoutMs?: number; maxOutputBytes?: number } = {}
   ): Promise<CommandResult> {
-    const commandArgs = options.serial
-      ? ["-s", assertSerial(options.serial), ...args]
-      : [...args];
-    const result = await this.runner(this.executable, commandArgs, {
-      timeoutMs: options.timeoutMs ?? this.timeoutMs,
-      maxOutputBytes: options.maxOutputBytes ?? this.maxOutputBytes,
-    });
+    const result = await this.runRaw(args, options);
     if (result.exitCode !== 0) {
       const detail = result.stderr.toString("utf8").trim() || result.stdout.toString("utf8").trim();
       throw new AdbCommandError(
@@ -232,6 +257,19 @@ export class AdbClient {
       );
     }
     return result;
+  }
+
+  async runRaw(
+    args: readonly string[],
+    options: { serial?: string; timeoutMs?: number; maxOutputBytes?: number } = {}
+  ): Promise<CommandResult> {
+    const commandArgs = options.serial
+      ? ["-s", assertSerial(options.serial), ...args]
+      : [...args];
+    return this.runner(this.executable, commandArgs, {
+      timeoutMs: options.timeoutMs ?? this.timeoutMs,
+      maxOutputBytes: options.maxOutputBytes ?? this.maxOutputBytes,
+    });
   }
 
   async text(
@@ -246,6 +284,54 @@ export class AdbClient {
     return parseDevices(await this.text(["devices", "-l"]));
   }
 
+  async listDevicesWithCapabilities(): Promise<AdbDeviceWithCapabilities[]> {
+    const devices = await this.listDevices();
+    return Promise.all(
+      devices.map(async (device) => ({
+        ...device,
+        capabilities:
+          device.state === "device"
+            ? await this.detectCapabilities(device.serial, device)
+            : unavailableCapabilities("unknown"),
+      }))
+    );
+  }
+
+  async detectCapabilities(
+    serial: string,
+    device?: AdbDevice,
+    options: { refresh?: boolean } = {}
+  ): Promise<DeviceCapabilities> {
+    const safeSerial = assertSerial(serial);
+    if (!options.refresh) {
+      const cached = this.capabilitiesCache.get(safeSerial);
+      if (cached) return cached;
+    }
+
+    const entries = await Promise.all(
+      Object.entries(COMMAND_CAPABILITIES).map(async ([key, command]) => {
+        const result = await this.runRaw(["shell", "command", "-v", command], {
+          serial: safeSerial,
+          timeoutMs: 5_000,
+          maxOutputBytes: 16 * 1024,
+        });
+        return [key, result.exitCode === 0 && Boolean(result.stdout.toString("utf8").trim())] as const;
+      })
+    );
+    const detected = Object.fromEntries(entries) as Omit<DeviceCapabilities, "platform">;
+    const propertyOutput = detected.hasGetprop
+      ? await this.readPropertiesForDetection(safeSerial)
+      : "";
+    const deviceForDetection =
+      device ?? (await this.listDevices()).find((candidate) => candidate.serial === safeSerial);
+    const capabilities: DeviceCapabilities = {
+      ...detected,
+      platform: inferPlatform(deviceForDetection, propertyOutput, detected),
+    };
+    this.capabilitiesCache.set(safeSerial, capabilities);
+    return capabilities;
+  }
+
   async connect(target: string): Promise<string> {
     return this.text(["connect", assertNetworkTarget(target)]);
   }
@@ -253,4 +339,65 @@ export class AdbClient {
   async disconnect(target: string): Promise<string> {
     return this.text(["disconnect", assertNetworkTarget(target)]);
   }
+
+  private async readPropertiesForDetection(serial: string): Promise<string> {
+    const result = await this.runRaw(["shell", "getprop"], {
+      serial,
+      timeoutMs: 5_000,
+      maxOutputBytes: 512 * 1024,
+    });
+    return result.exitCode === 0 ? result.stdout.toString("utf8") : "";
+  }
+}
+
+function unavailableCapabilities(platform: DevicePlatform): DeviceCapabilities {
+  return {
+    hasDumpsys: false,
+    hasUiAutomator: false,
+    hasLogcat: false,
+    hasInput: false,
+    hasScreencap: false,
+    hasActivityManager: false,
+    hasMonkey: false,
+    hasGetprop: false,
+    hasWm: false,
+    platform,
+  };
+}
+
+function inferPlatform(
+  device: AdbDevice | undefined,
+  propertyOutput: string,
+  capabilities: Omit<DeviceCapabilities, "platform">
+): DevicePlatform {
+  const detailText = [
+    device?.serial,
+    device?.product,
+    device?.model,
+    device?.device,
+    propertyOutput,
+  ]
+    .filter(Boolean)
+    .join("\n")
+    .toLowerCase();
+
+  if (/\b(?:vega|kepler)\b/.test(detailText)) return "vega";
+  if (
+    detailText.includes("virtualdevice") &&
+    !capabilities.hasDumpsys &&
+    !capabilities.hasUiAutomator &&
+    !capabilities.hasInput
+  ) {
+    return "vega";
+  }
+  if (
+    /\[ro\.build\.version\.sdk\]:/.test(detailText) ||
+    capabilities.hasDumpsys ||
+    capabilities.hasUiAutomator ||
+    capabilities.hasInput ||
+    capabilities.hasScreencap
+  ) {
+    return "android";
+  }
+  return "unknown";
 }

@@ -9,6 +9,7 @@ import { BuildRunner, fileExists, loadBuildConfig } from "./build.js";
 import { EmulatorManager } from "./emulator.js";
 import { ObsController, ObsSourceMapping } from "./obs.js";
 import { createAdbMcpServer } from "./server.js";
+import { VegaClient } from "./vega.js";
 
 function environmentInteger(name: string, fallback: number, minimum: number): number {
   const raw = process.env[name];
@@ -62,6 +63,11 @@ async function main(): Promise<void> {
     timeoutMs,
     maxOutputBytes,
   });
+  const vegaClient = new VegaClient({
+    executable: process.env.VEGA_EXECUTABLE || "vega",
+    timeoutMs,
+    maxOutputBytes,
+  });
   const sdkRoot = process.env.ANDROID_SDK_ROOT || process.env.ANDROID_HOME;
   const emulatorExecutable =
     process.env.ANDROID_EMULATOR_EXECUTABLE ||
@@ -87,6 +93,7 @@ async function main(): Promise<void> {
       physicalDevice: obsMapping("OBS_PHYSICAL_DEVICE"),
     }),
     buildRunner,
+    vegaClient,
   });
 
   await server.connect(new StdioServerTransport());

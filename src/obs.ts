@@ -36,6 +36,14 @@ export interface StartObsRecordingResult {
   status: ObsStatus;
 }
 
+export interface ObsScreenshotResult {
+  target: ObsTarget;
+  sceneName: string;
+  sourceName: string;
+  selectedWindow?: string;
+  data: Buffer;
+}
+
 export class ObsCommandError extends Error {
   constructor(message: string) {
     super(message);
@@ -138,9 +146,22 @@ export class ObsController {
     sourceName: string,
     avdName: string
   ): Promise<string> {
+    return this.selectSourceWindow(client, sourceName, [avdName], `AVD ${avdName}`);
+  }
+
+  private async selectSourceWindow(
+    client: OBSWebSocket,
+    sourceName: string,
+    matchTerms: readonly string[],
+    description: string
+  ): Promise<string> {
     await client.call("GetInputSettings", { inputName: sourceName });
-    const normalizedAvd = avdName.trim().toLowerCase();
-    if (!normalizedAvd) throw new ObsCommandError("avd_name must be a non-empty string");
+    const normalizedTerms = matchTerms
+      .map((term) => term.trim().toLowerCase())
+      .filter((term) => term.length >= 3);
+    if (normalizedTerms.length === 0) {
+      throw new ObsCommandError("At least one OBS window match term must be provided");
+    }
 
     for (const propertyName of ["window", "application"] as const) {
       try {
@@ -155,7 +176,7 @@ export class ObsController {
         }>;
         const match = items.find((item) => {
           const itemName = typeof item.itemName === "string" ? item.itemName.toLowerCase() : "";
-          return item.itemEnabled !== false && itemName.includes(normalizedAvd);
+          return item.itemEnabled !== false && normalizedTerms.some((term) => itemName.includes(term));
         });
         if (!match || (typeof match.itemValue !== "string" && typeof match.itemValue !== "number")) {
           continue;
@@ -172,7 +193,7 @@ export class ObsController {
     }
 
     throw new ObsCommandError(
-      `OBS source ${sourceName} does not expose a window or application matching AVD ${avdName}`
+      `OBS source ${sourceName} does not expose a window or application matching ${description}`
     );
   }
 
@@ -194,6 +215,29 @@ export class ObsController {
     if (Buffer.from(encoded, "base64").length < 100) {
       throw new ObsCommandError(`OBS source ${sourceName} did not produce a valid preview image`);
     }
+  }
+
+  private async sourceScreenshot(
+    client: OBSWebSocket,
+    sourceName: string,
+    width: number,
+    height: number
+  ): Promise<Buffer> {
+    const screenshot = await client.call("GetSourceScreenshot", {
+      sourceName,
+      imageFormat: "png",
+      imageWidth: width,
+      imageHeight: height,
+      imageCompressionQuality: 100,
+    });
+    const encoded = screenshot.imageData.includes(",")
+      ? screenshot.imageData.slice(screenshot.imageData.indexOf(",") + 1)
+      : screenshot.imageData;
+    const data = Buffer.from(encoded, "base64");
+    if (data.length < 100) {
+      throw new ObsCommandError(`OBS source ${sourceName} did not produce a valid screenshot`);
+    }
+    return data;
   }
 
   private async readStatus(client: OBSWebSocket): Promise<ObsStatus> {
@@ -303,6 +347,55 @@ export class ObsController {
         ...(selectedWindow ? { selectedWindow } : {}),
         alreadyRecording: false,
         status,
+      };
+    } finally {
+      await client?.disconnect().catch(() => undefined);
+    }
+  }
+
+  async captureScreenshot(
+    target: ObsTarget,
+    options: {
+      avdName?: string;
+      windowMatchTerms?: string[];
+      launchIfNeeded: boolean;
+      timeoutMs: number;
+      width: number;
+      height: number;
+    }
+  ): Promise<ObsScreenshotResult> {
+    const mapping = this.mapping(target);
+    let client: OBSWebSocket | undefined;
+    try {
+      client = await this.connectOnce().catch(() => undefined);
+      if (!client) {
+        if (!options.launchIfNeeded) {
+          throw new ObsCommandError("OBS is not reachable through WebSocket and launch_if_needed is false");
+        }
+        await this.launch(mapping.sceneName);
+        client = await this.connectWithRetry(options.timeoutMs);
+      }
+
+      await client.call("SetCurrentProgramScene", { sceneName: mapping.sceneName });
+      const selectedWindow =
+        target === "emulator" && options.avdName
+          ? await this.selectEmulatorWindow(client, mapping.sourceName, options.avdName)
+          : target === "emulator" && options.windowMatchTerms?.length
+            ? await this.selectSourceWindow(
+                client,
+                mapping.sourceName,
+                options.windowMatchTerms,
+                options.windowMatchTerms.join(", ")
+              )
+          : undefined;
+      await this.verifySource(client, mapping.sourceName);
+      const data = await this.sourceScreenshot(client, mapping.sourceName, options.width, options.height);
+      return {
+        target,
+        sceneName: mapping.sceneName,
+        sourceName: mapping.sourceName,
+        ...(selectedWindow ? { selectedWindow } : {}),
+        data,
       };
     } finally {
       await client?.disconnect().catch(() => undefined);

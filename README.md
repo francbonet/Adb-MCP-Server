@@ -207,7 +207,7 @@ Restart Claude Desktop after saving the file. In a conversation, open the connec
 
 ## Tools
 
-- `list_devices`: list ADB-visible devices.
+- `list_devices`: list ADB-visible devices, detected platform, and Android shell utility capabilities.
 - `list_avds`: list configured Android Virtual Devices and their running state.
 - `start_emulator`: start an AVD with quick or cold boot and select it as the active device.
 - `connect_device` / `disconnect_device`: manage ADB-over-TCP targets.
@@ -229,6 +229,30 @@ Restart Claude Desktop after saving the file. In a conversation, open the connec
 - `stop_obs_recording`: stop recording and return the saved video path.
 - `list_build_profiles`: show configured build profiles.
 - `run_build`: run a configured build profile and optionally install the resulting APK.
+
+## Vega and Kepler devices
+
+The server detects device capabilities before running Android-specific tools. Ready devices are classified as `android`, `vega`, or `unknown`, and `list_devices` reports whether the target exposes `dumpsys`, `uiautomator`, `logcat`, `input`, and `screencap`.
+
+When a Vega/Kepler device is detected, the server uses the Vega CLI backend where Amazon documents an equivalent:
+
+- `press_key`, `tap`, `swipe`, and `type_text` use `inputd-cli` through `vega exec vda -s <serial> shell`.
+- `get_logcat` uses `loggingctl log` through the Vega device shell.
+- `launch_app` uses `vega device launch-app --device <serial> --appName <package>.main`.
+- `screenshot` uses `gwsi-tool-screenshooter` through VDA and then pulls the PNG for optimization. If that device-side backend fails on a Vega Virtual Device, the server falls back to the configured OBS emulator source.
+
+Amazon's Vega documentation states that `gwsi-tool-screenshooter` works on physical Vega/Kepler devices and does not work on Vega Virtual Device. For virtual-device screenshots, configure `OBS_EMULATOR_SCENE` and `OBS_EMULATOR_SOURCE` as a reusable OBS window-capture source. The MCP will try to select the window dynamically from the active device serial/model/product/device before requesting the frame. On unsupported targets, and whenever a required Android shell utility is unavailable, the MCP tool returns a structured unsupported response instead of surfacing raw `/bin/sh: command not found` output:
+
+```json
+{
+  "ok": false,
+  "reason": "unsupported",
+  "message": "dump_ui requires uiautomator, which is not available on this Vega/Kepler device.",
+  "device_serial": "emulator-5554",
+  "platform": "vega",
+  "missing_capability": "uiautomator"
+}
+```
 
 ## Android emulators
 
@@ -255,7 +279,7 @@ Use `ADB_ALLOWED_AVDS` in shared environments to restrict which AVD names an age
 
 ## Screenshot optimization
 
-The `screenshot` tool captures a raw PNG with `adb exec-out screencap -p`, then processes it before returning it to the agent. By default it:
+The `screenshot` tool captures a raw PNG with `adb exec-out screencap -p` on Android devices, or the Vega screenshot backend on supported physical Vega/Kepler devices, then processes it before returning it to the agent. By default it:
 
 - Fits the image inside `1280x720` without enlarging smaller screenshots.
 - Uses an indexed PNG palette with up to 256 colours.
@@ -325,6 +349,8 @@ ADB itself is not an OBS video source. Protected DRM/HDCP content may appear bla
 ```
 
 `open_obs` starts OBS when necessary and waits for WebSocket to become ready. `start_obs_recording` is idempotent when OBS is already recording the configured scene; it refuses to switch scenes during a different active recording. `stop_obs_recording` finalizes the recording and returns the path reported by OBS.
+
+The `screenshot` tool can also use the configured `OBS_EMULATOR_SCENE` / `OBS_EMULATOR_SOURCE` as a host-side fallback for Vega Virtual Device screenshots. This requests a single PNG frame through OBS WebSocket and does not start recording. The source should be a reusable window/application capture input; the MCP attempts to point it at the active emulator window using the selected device serial and ADB details.
 
 ## Installing and uninstalling applications
 
@@ -405,6 +431,7 @@ Example:
 Environment variables:
 
 - `ADB_EXECUTABLE`: ADB executable path. Defaults to `adb`.
+- `VEGA_EXECUTABLE`: Vega CLI executable path used for Vega/Kepler backends. Defaults to `vega`.
 - `ADB_PROJECT_ROOT`: project root used for default config and APK root. Defaults to the server working directory.
 - `ADB_APK_ROOT`: directory from which APK installation is allowed. Defaults to `ADB_PROJECT_ROOT`.
 - `ADB_BUILD_CONFIG`: path to build profile JSON. Defaults to `adb-mcp.config.json` in the server working directory when present.

@@ -14,6 +14,8 @@ import {
   AdbClient,
   AdbCommandError,
   AdbDevice,
+  AdbDeviceWithCapabilities,
+  DeviceCapabilities,
   assertComponent,
   assertPackageName,
   assertSerial,
@@ -24,6 +26,7 @@ import { BuildCommandError, BuildRunner } from "./build.js";
 import { EmulatorManager } from "./emulator.js";
 import { ObsController, ObsTarget } from "./obs.js";
 import { optimizeScreenshot } from "./screenshot.js";
+import { VegaClient } from "./vega.js";
 
 const DEVICE_CATALOG_URI = "adb://devices";
 const KEY_EVENTS = {
@@ -65,6 +68,7 @@ export interface ServerDependencies {
   emulatorManager?: EmulatorManager;
   obsController?: ObsController;
   buildRunner?: BuildRunner;
+  vegaClient?: VegaClient;
 }
 
 function textResult(text: string, isError = false) {
@@ -74,12 +78,27 @@ function textResult(text: string, isError = false) {
   };
 }
 
-function formatDevice(device: AdbDevice): string {
+function formatDevice(device: AdbDevice | AdbDeviceWithCapabilities): string {
   const detail = [device.model, device.product, device.device].filter(Boolean).join(" / ");
-  return `- **${device.serial}** — ${device.state}, ${device.connectionType}${detail ? `, ${detail}` : ""}`;
+  const lines = [
+    `- **${device.serial}** — ${device.state}, ${device.connectionType}${detail ? `, ${detail}` : ""}`,
+  ];
+  if ("capabilities" in device) {
+    const capabilities = device.capabilities;
+    lines.push(
+      `  Platform: ${capabilities.platform}`,
+      "  Capabilities:",
+      `  - dumpsys: ${yesNo(capabilities.hasDumpsys)}`,
+      `  - uiautomator: ${yesNo(capabilities.hasUiAutomator)}`,
+      `  - logcat: ${yesNo(capabilities.hasLogcat)}`,
+      `  - input: ${yesNo(capabilities.hasInput)}`,
+      `  - screencap: ${yesNo(capabilities.hasScreencap)}`
+    );
+  }
+  return lines.join("\n");
 }
 
-function renderDeviceCatalog(devices: AdbDevice[], activeSerial?: string): string {
+function renderDeviceCatalog(devices: Array<AdbDevice | AdbDeviceWithCapabilities>, activeSerial?: string): string {
   const lines = ["# ADB devices", ""];
   if (devices.length === 0) {
     lines.push("No emulators or physical devices are visible to ADB.");
@@ -88,6 +107,53 @@ function renderDeviceCatalog(devices: AdbDevice[], activeSerial?: string): strin
   }
   lines.push("", `Active device: ${activeSerial ?? "none"}`);
   return lines.join("\n");
+}
+
+function yesNo(value: boolean): string {
+  return value ? "yes" : "no";
+}
+
+function unsupportedResult(
+  tool: string,
+  serial: string,
+  capabilities: DeviceCapabilities,
+  missingCapability: string,
+  message?: string
+) {
+  const platformName = capabilities.platform === "vega" ? "Vega/Kepler" : capabilities.platform;
+  return textResult(
+    JSON.stringify(
+      {
+        ok: false,
+        reason: "unsupported",
+        message:
+          message ??
+          `${tool} requires ${missingCapability}, which is not available on this ${platformName} device.`,
+        device_serial: serial,
+        platform: capabilities.platform,
+        missing_capability: missingCapability,
+      },
+      null,
+      2
+    ),
+    true
+  );
+}
+
+async function deviceCapabilities(adb: AdbClient, serial: string): Promise<DeviceCapabilities> {
+  return adb.detectCapabilities(serial);
+}
+
+async function obsWindowMatchTerms(adb: AdbClient, serial: string): Promise<string[]> {
+  const devices = await adb.listDevices();
+  const device = devices.find((candidate) => candidate.serial === serial);
+  return Array.from(
+    new Set(
+      [serial, device?.model, device?.product, device?.device]
+        .filter((value): value is string => Boolean(value?.trim()))
+        .flatMap((value) => [value, value.replace(/_/g, " ")])
+    )
+  );
 }
 
 function renderBuildProfiles(buildRunner?: BuildRunner): string {
@@ -237,6 +303,7 @@ export function createAdbMcpServer(
     emulatorManager,
     obsController,
     buildRunner,
+    vegaClient,
   } = dependencies;
   const server = new Server(
     { name: "adb-mcp-server", version: "0.1.0" },
@@ -266,7 +333,7 @@ export function createAdbMcpServer(
     if (request.params.uri !== DEVICE_CATALOG_URI) {
       throw new McpError(ErrorCode.InvalidParams, `Resource ${request.params.uri} not found`);
     }
-    const devices = await adb.listDevices();
+    const devices = await adb.listDevicesWithCapabilities();
     return {
       contents: [
         {
@@ -618,7 +685,7 @@ export function createAdbMcpServer(
     try {
       switch (name) {
         case "list_devices": {
-          const devices = await adb.listDevices();
+          const devices = await adb.listDevicesWithCapabilities();
           return textResult(renderDeviceCatalog(devices, state.activeSerial));
         }
         case "list_avds": {
@@ -712,11 +779,54 @@ export function createAdbMcpServer(
         }
         case "screenshot": {
           const serial = await resolveDevice(adb, state, optionalString(args, "device_serial"));
-          const result = await adb.run(["exec-out", "screencap", "-p"], {
-            serial,
-            maxOutputBytes: screenshotMaxBytes,
-          });
-          const optimized = await optimizeScreenshot(result.stdout, {
+          const capabilities = await deviceCapabilities(adb, serial);
+          let screenshotData: Buffer;
+          let screenshotSource = "device";
+          if (capabilities.platform === "vega") {
+            if (!vegaClient) {
+              return unsupportedResult(
+                "screenshot",
+                serial,
+                capabilities,
+                "vega_cli",
+                "screenshot requires the Vega CLI backend for this Vega/Kepler device."
+              );
+            }
+            try {
+              screenshotData = await vegaClient.screenshot(serial, screenshotMaxBytes);
+            } catch (error) {
+              if (obsController && serial.startsWith("emulator-")) {
+                try {
+                  const obsScreenshot = await obsController.captureScreenshot("emulator", {
+                    windowMatchTerms: await obsWindowMatchTerms(adb, serial),
+                    launchIfNeeded: true,
+                    timeoutMs: 30_000,
+                    width: screenshotMaxWidth,
+                    height: screenshotMaxHeight,
+                  });
+                  screenshotData = obsScreenshot.data;
+                  screenshotSource = `OBS source ${obsScreenshot.sourceName}`;
+                } catch (obsError) {
+                  const message = obsError instanceof Error ? obsError.message : String(obsError);
+                  return unsupportedResult("screenshot", serial, capabilities, "obs_screenshot", message);
+                }
+              } else {
+                const message = error instanceof Error ? error.message : String(error);
+                return unsupportedResult("screenshot", serial, capabilities, "gwsi-tool-screenshooter", message);
+              }
+            }
+          } else {
+            if (!capabilities.hasScreencap) {
+              return unsupportedResult("screenshot", serial, capabilities, "screencap");
+            }
+            screenshotData = (
+              await adb.run(["exec-out", "screencap", "-p"], {
+                serial,
+                maxOutputBytes: screenshotMaxBytes,
+              })
+            ).stdout;
+          }
+          const optimized = await optimizeScreenshot(screenshotData, {
             maxBytes: screenshotOutputMaxBytes,
             maxWidth: screenshotMaxWidth,
             maxHeight: screenshotMaxHeight,
@@ -727,6 +837,7 @@ export function createAdbMcpServer(
                 type: "text" as const,
                 text: [
                   `Screenshot captured from ${serial}.`,
+                  `Source: ${screenshotSource}.`,
                   `Original: ${optimized.originalWidth}x${optimized.originalHeight}, ${optimized.originalBytes} bytes.`,
                   `Delivered: ${optimized.width}x${optimized.height}, ${optimized.data.length} bytes, PNG palette up to ${optimized.colours} colours.`,
                 ].join("\n"),
@@ -737,6 +848,10 @@ export function createAdbMcpServer(
         }
         case "get_current_activity": {
           const serial = await resolveDevice(adb, state, optionalString(args, "device_serial"));
+          const capabilities = await deviceCapabilities(adb, serial);
+          if (!capabilities.hasDumpsys) {
+            return unsupportedResult("get_current_activity", serial, capabilities, "dumpsys");
+          }
           const output = await adb.text(["shell", "dumpsys", "activity", "activities"], { serial });
           const lines = output
             .split(/\r?\n/)
@@ -746,6 +861,10 @@ export function createAdbMcpServer(
         }
         case "dump_ui": {
           const serial = await resolveDevice(adb, state, optionalString(args, "device_serial"));
+          const capabilities = await deviceCapabilities(adb, serial);
+          if (!capabilities.hasUiAutomator) {
+            return unsupportedResult("dump_ui", serial, capabilities, "uiautomator");
+          }
           const output = await adb.text(["exec-out", "uiautomator", "dump", "/dev/tty"], {
             serial,
             maxOutputBytes: 2 * 1024 * 1024,
@@ -757,14 +876,44 @@ export function createAdbMcpServer(
           const serial = await resolveDevice(adb, state, optionalString(args, "device_serial"));
           const key = requiredString(args, "key") as KeyEventName;
           if (!(key in KEY_EVENTS)) throw new AdbCommandError(`Unsupported key: ${key}`);
-          await adb.text(["shell", "input", "keyevent", String(KEY_EVENTS[key])], { serial });
+          const capabilities = await deviceCapabilities(adb, serial);
+          if (capabilities.platform === "vega") {
+            if (!vegaClient) {
+              return unsupportedResult(
+                "press_key",
+                serial,
+                capabilities,
+                "vega_cli",
+                "press_key requires the Vega CLI backend for this Vega/Kepler device."
+              );
+            }
+            await vegaClient.pressKey(serial, key);
+          } else {
+            if (!capabilities.hasInput) return unsupportedResult("press_key", serial, capabilities, "input");
+            await adb.text(["shell", "input", "keyevent", String(KEY_EVENTS[key])], { serial });
+          }
           return textResult(`Pressed ${key} on ${serial}.`);
         }
         case "tap": {
           const serial = await resolveDevice(adb, state, optionalString(args, "device_serial"));
           const x = boundedInteger(args, "x", 0, 10000);
           const y = boundedInteger(args, "y", 0, 10000);
-          await adb.text(["shell", "input", "tap", String(x), String(y)], { serial });
+          const capabilities = await deviceCapabilities(adb, serial);
+          if (capabilities.platform === "vega") {
+            if (!vegaClient) {
+              return unsupportedResult(
+                "tap",
+                serial,
+                capabilities,
+                "vega_cli",
+                "tap requires the Vega CLI backend for this Vega/Kepler device."
+              );
+            }
+            await vegaClient.tap(serial, x, y);
+          } else {
+            if (!capabilities.hasInput) return unsupportedResult("tap", serial, capabilities, "input");
+            await adb.text(["shell", "input", "tap", String(x), String(y)], { serial });
+          }
           return textResult(`Tapped (${x}, ${y}) on ${serial}.`);
         }
         case "swipe": {
@@ -774,17 +923,47 @@ export function createAdbMcpServer(
           const x2 = boundedInteger(args, "x2", 0, 10000);
           const y2 = boundedInteger(args, "y2", 0, 10000);
           const duration = boundedInteger(args, "duration_ms", 50, 5000, 300);
-          await adb.text(
-            ["shell", "input", "swipe", String(x1), String(y1), String(x2), String(y2), String(duration)],
-            { serial }
-          );
+          const capabilities = await deviceCapabilities(adb, serial);
+          if (capabilities.platform === "vega") {
+            if (!vegaClient) {
+              return unsupportedResult(
+                "swipe",
+                serial,
+                capabilities,
+                "vega_cli",
+                "swipe requires the Vega CLI backend for this Vega/Kepler device."
+              );
+            }
+            await vegaClient.swipe(serial, x1, y1, x2, y2, duration);
+          } else {
+            if (!capabilities.hasInput) return unsupportedResult("swipe", serial, capabilities, "input");
+            await adb.text(
+              ["shell", "input", "swipe", String(x1), String(y1), String(x2), String(y2), String(duration)],
+              { serial }
+            );
+          }
           return textResult(`Swiped (${x1}, ${y1}) → (${x2}, ${y2}) in ${duration} ms on ${serial}.`);
         }
         case "type_text": {
           const serial = await resolveDevice(adb, state, optionalString(args, "device_serial"));
           const text = requiredString(args, "text");
           if (text.length > 500) throw new AdbCommandError("text must not exceed 500 characters");
-          await adb.text(["shell", "input", "text", encodeInputText(text)], { serial });
+          const capabilities = await deviceCapabilities(adb, serial);
+          if (capabilities.platform === "vega") {
+            if (!vegaClient) {
+              return unsupportedResult(
+                "type_text",
+                serial,
+                capabilities,
+                "vega_cli",
+                "type_text requires the Vega CLI backend for this Vega/Kepler device."
+              );
+            }
+            await vegaClient.typeText(serial, text);
+          } else {
+            if (!capabilities.hasInput) return unsupportedResult("type_text", serial, capabilities, "input");
+            await adb.text(["shell", "input", "text", encodeInputText(text)], { serial });
+          }
           return textResult(`Typed ${text.length} characters on ${serial}.`);
         }
         case "install_apk": {
@@ -821,17 +1000,41 @@ export function createAdbMcpServer(
           const serial = await resolveDevice(adb, state, optionalString(args, "device_serial"));
           const packageName = assertPackageName(requiredString(args, "package_name"));
           const activity = optionalString(args, "activity");
-          const output = activity
-            ? await adb.text(["shell", "am", "start", "-n", assertComponent(activity)], { serial })
-            : await adb.text(
-                ["shell", "monkey", "-p", packageName, "-c", "android.intent.category.LAUNCHER", "1"],
-                { serial }
+          const capabilities = await deviceCapabilities(adb, serial);
+          let output: string;
+          if (capabilities.platform === "vega") {
+            if (activity) {
+              return unsupportedResult(
+                "launch_app",
+                serial,
+                capabilities,
+                "android_activity",
+                "launch_app activity is Android-specific; Vega launch uses the package main component."
               );
+            }
+            if (!vegaClient) {
+              return unsupportedResult("launch_app", serial, capabilities, "vega_cli");
+            }
+            output = await vegaClient.launchApp(serial, packageName);
+          } else if (activity) {
+            if (!capabilities.hasActivityManager) return unsupportedResult("launch_app", serial, capabilities, "am");
+            output = await adb.text(["shell", "am", "start", "-n", assertComponent(activity)], { serial });
+          } else {
+            if (!capabilities.hasMonkey) return unsupportedResult("launch_app", serial, capabilities, "monkey");
+            output = await adb.text(
+              ["shell", "monkey", "-p", packageName, "-c", "android.intent.category.LAUNCHER", "1"],
+              { serial }
+            );
+          }
           return textResult(`${output}\nLaunch requested for ${packageName} on ${serial}.`);
         }
         case "stop_app": {
           const serial = await resolveDevice(adb, state, optionalString(args, "device_serial"));
           const packageName = assertPackageName(requiredString(args, "package_name"));
+          const capabilities = await deviceCapabilities(adb, serial);
+          if (!capabilities.hasActivityManager) {
+            return unsupportedResult("stop_app", serial, capabilities, "am");
+          }
           await adb.text(["shell", "am", "force-stop", packageName], { serial });
           return textResult(`Force-stopped ${packageName} on ${serial}.`);
         }
@@ -842,13 +1045,30 @@ export function createAdbMcpServer(
           if (contains && contains.length > 200) {
             throw new AdbCommandError("contains must not exceed 200 characters");
           }
-          const output = await adb.text(["logcat", "-d", "-v", "threadtime", "-t", String(lineCount)], {
-            serial,
-            maxOutputBytes: 10 * 1024 * 1024,
-          });
-          const filtered = contains
-            ? output.split(/\r?\n/).filter((line) => line.toLowerCase().includes(contains)).join("\n")
-            : output;
+          const capabilities = await deviceCapabilities(adb, serial);
+          const output =
+            capabilities.platform === "vega"
+              ? vegaClient
+                ? await vegaClient.logs(serial, 10 * 1024 * 1024)
+                : undefined
+              : capabilities.hasLogcat
+                ? await adb.text(["logcat", "-d", "-v", "threadtime", "-t", String(lineCount)], {
+                    serial,
+                    maxOutputBytes: 10 * 1024 * 1024,
+                  })
+                : undefined;
+          if (output === undefined) {
+            return unsupportedResult(
+              "get_logcat",
+              serial,
+              capabilities,
+              capabilities.platform === "vega" ? "vega_cli" : "logcat"
+            );
+          }
+          const lines = contains
+            ? output.split(/\r?\n/).filter((line) => line.toLowerCase().includes(contains))
+            : output.split(/\r?\n/);
+          const filtered = lines.slice(-lineCount).join("\n");
           return textResult(filtered || "No matching logcat lines found.");
         }
         case "get_obs_status": {
