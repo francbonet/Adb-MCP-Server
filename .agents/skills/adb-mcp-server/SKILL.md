@@ -27,10 +27,11 @@ Use this section to choose the right tool group. Do not memorize or duplicate sc
 - Emulator startup: use `start_emulator` when an AVD must be running; use a non-headless emulator when OBS needs to capture the emulator window.
 - Project scoping: use `set_project_root` before installing APKs from the active app repo; this restricts `install_apk` to files under that repo for the session.
 - Screen inspection: use `screenshot` for visual state, `dump_ui` for UI hierarchy when available, and `get_current_activity` for the resumed Android activity.
+- Vega/Kepler: `list_devices` reports detected platform and Android shell utility capabilities. On Vega Virtual Device, `screenshot` can fall back to the configured OBS emulator source when device-side screenshot is unavailable; `dump_ui` and `get_current_activity` may return structured unsupported responses because Android `uiautomator`/`dumpsys` are not present.
 - Remote input: use `press_key` for D-pad, media, back, home, and other key events; use `tap`, `swipe`, and `type_text` for bounded direct input when inspection supports it.
 - APK lifecycle: use `install_apk`, `uninstall_app`, `launch_app`, and `stop_app` for app control, then verify the result with inspection tools.
-- Diagnostics: use `get_logcat` with focused filters, recent line counts, or failure windows instead of returning broad logs.
-- Evidence recording: use `get_obs_status`, `open_obs`, `start_obs_recording`, and `stop_obs_recording` only when recording is requested or useful to preserve reproduction evidence.
+- Diagnostics: use `get_logcat` with focused filters, recent line counts, or failure windows instead of returning broad logs. On Vega/Kepler, this may be backed by Vega `loggingctl` rather than Android logcat.
+- Evidence recording: use `get_obs_status`, `open_obs`, `start_obs_recording`, and `stop_obs_recording` only when recording is requested or useful to preserve reproduction evidence. OBS can also provide screenshot fallback for Vega Virtual Device without starting a recording.
 - Builds: use `list_build_profiles` to discover allowed builds and `run_build` to run configured profiles; use `install_after_build` only when the target device and install intent are clear.
 
 ## Safety Rules
@@ -54,9 +55,10 @@ Install an APK from the current app repo:
 Capture a useful failure report:
 
 1. Reproduce the issue with concrete navigation tools.
-2. Capture `screenshot` and `get_current_activity`.
-3. Call `get_logcat` with a focused filter or recent line count.
-4. Summarize observed state, expected state, and the most relevant log lines.
+2. Capture `screenshot`; for Vega Virtual Device this may use OBS host-side capture if configured.
+3. Capture `get_current_activity` when supported; if it returns structured unsupported for Vega/Kepler, keep going with screenshot and logs.
+4. Call `get_logcat` with a focused filter or recent line count.
+5. Summarize observed state, expected state, unsupported tool responses if any, and the most relevant log lines.
 
 Record evidence with OBS:
 
