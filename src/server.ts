@@ -58,6 +58,22 @@ type KeySequenceStep = {
   delayMsAfter: number;
 };
 
+type UiNodeSummary = {
+  text: string;
+  resource_id: string;
+  content_desc: string;
+  class: string;
+  focused: boolean;
+  bounds: string;
+};
+
+type UiNodeQuery = {
+  text?: string;
+  resource_id?: string;
+  content_desc?: string;
+  focused?: boolean;
+};
+
 export interface SessionState {
   activeSerial?: string;
   projectRoot?: string;
@@ -326,6 +342,90 @@ function parseKeySequence(args: Record<string, unknown>): KeySequenceStep[] {
   });
 }
 
+function optionalBoolean(args: Record<string, unknown>, key: string): boolean | undefined {
+  const value = args[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== "boolean") throw new AdbCommandError(`${key} must be a boolean`);
+  return value;
+}
+
+function optionalUiFilterString(args: Record<string, unknown>, key: keyof UiNodeQuery): string | undefined {
+  const value = args[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") throw new AdbCommandError(`${key} must be a string`);
+  return value;
+}
+
+function parseUiNodeQuery(args: Record<string, unknown>): UiNodeQuery {
+  const query: UiNodeQuery = {
+    text: optionalUiFilterString(args, "text"),
+    resource_id: optionalUiFilterString(args, "resource_id"),
+    content_desc: optionalUiFilterString(args, "content_desc"),
+    focused: optionalBoolean(args, "focused"),
+  };
+
+  if (
+    query.text === undefined &&
+    query.resource_id === undefined &&
+    query.content_desc === undefined &&
+    query.focused === undefined
+  ) {
+    throw new AdbCommandError(
+      "At least one UI node filter is required: text, resource_id, content_desc, or focused"
+    );
+  }
+
+  return query;
+}
+
+function decodeXml(value: string): string {
+  return value
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, "\"")
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
+function extractUiNodes(xml: string): UiNodeSummary[] {
+  return [...xml.matchAll(/<node\b[^>]*\/?>/g)].map((match) => {
+    const node = match[0];
+    const attr = (name: string) =>
+      node.match(new RegExp(`${name}="([^"]*)"`, "u"))?.[1] ?? "";
+
+    return {
+      text: decodeXml(attr("text")),
+      resource_id: decodeXml(attr("resource-id")),
+      content_desc: decodeXml(attr("content-desc")),
+      class: decodeXml(attr("class")),
+      focused: attr("focused") === "true",
+      bounds: attr("bounds"),
+    };
+  });
+}
+
+function nodeMatches(node: UiNodeSummary, query: UiNodeQuery): boolean {
+  if (query.text !== undefined && node.text !== query.text) return false;
+  if (query.resource_id !== undefined && node.resource_id !== query.resource_id) return false;
+  if (query.content_desc !== undefined && node.content_desc !== query.content_desc) return false;
+  if (query.focused !== undefined && node.focused !== query.focused) return false;
+  return true;
+}
+
+async function dumpUiXml(adb: AdbClient, serial: string): Promise<string> {
+  const output = await adb.text(["exec-out", "uiautomator", "dump", "/dev/tty"], {
+    serial,
+    maxOutputBytes: 2 * 1024 * 1024,
+  });
+
+  const xmlStart = output.indexOf("<?xml");
+  return xmlStart >= 0 ? output.slice(xmlStart) : output;
+}
+
+async function findUiNode(adb: AdbClient, serial: string, query: UiNodeQuery): Promise<UiNodeSummary | undefined> {
+  return extractUiNodes(await dumpUiXml(adb, serial)).find((node) => nodeMatches(node, query));
+}
+
 function parseProperties(output: string): Record<string, string> {
   const properties: Record<string, string> = {};
   for (const line of output.split(/\r?\n/)) {
@@ -339,6 +439,13 @@ const deviceInputSchema = {
   type: "string",
   description:
     "ADB serial such as emulator-5554, a USB serial, or host:port. If omitted, the active device is used; a sole ready device is selected automatically.",
+} as const;
+
+const uiNodeFilterInputSchema = {
+  text: { type: "string", description: "Exact node text to match" },
+  resource_id: { type: "string", description: "Exact UI Automator resource-id to match" },
+  content_desc: { type: "string", description: "Exact content-desc to match" },
+  focused: { type: "boolean", description: "Whether the node must currently be focused" },
 } as const;
 
 export function createAdbMcpServer(
@@ -362,7 +469,7 @@ export function createAdbMcpServer(
     {
       capabilities: { tools: {}, resources: {} },
       instructions:
-        "Use set_project_root with the user-confirmed repository path before installing an APK from a project other than the configured default. Use list_devices before interacting when device context is unclear. Use list_avds and start_emulator when an Android Emulator must be started. Select the intended emulator or physical device explicitly when more than one is connected. Prefer screenshot and dump_ui to inspect state, then use concrete navigation tools. Never assume an install, uninstall, launch, tap, key press, or recording succeeded: inspect the resulting state afterwards. Use get_logcat around failures to provide diagnostic context.",
+        "Use set_project_root with the user-confirmed repository path before installing an APK from a project other than the configured default. Use list_devices before interacting when device context is unclear. Use list_avds and start_emulator when an Android Emulator must be started. Select the intended emulator or physical device explicitly when more than one is connected. Prefer wait_for_ui_node, assert_ui_node, screenshot, and dump_ui to inspect state, then use concrete navigation tools. Never assume an install, uninstall, launch, tap, swipe, text input, or key press succeeded: inspect the resulting state afterwards. Use get_logcat around failures to provide diagnostic context.",
     }
   );
 
@@ -519,6 +626,51 @@ export function createAdbMcpServer(
         name: "dump_ui",
         description: "Return the current Android UI Automator hierarchy as XML when supported by the device.",
         inputSchema: { type: "object", properties: { device_serial: deviceInputSchema } },
+        annotations: { readOnlyHint: true, openWorldHint: false },
+      },
+      {
+        name: "wait_for_ui_node",
+        description:
+          "Poll Android UI Automator until a node matching exact text, resource_id, content_desc, and/or focused state exists.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            device_serial: deviceInputSchema,
+            ...uiNodeFilterInputSchema,
+            timeout_ms: { type: "integer", minimum: 0, maximum: 30_000, default: 3_000 },
+            poll_interval_ms: { type: "integer", minimum: 50, maximum: 1_000, default: 150 },
+          },
+          anyOf: [
+            { required: ["text"] },
+            { required: ["resource_id"] },
+            { required: ["content_desc"] },
+            { required: ["focused"] },
+          ],
+        },
+        annotations: { readOnlyHint: true, openWorldHint: false },
+      },
+      {
+        name: "assert_ui_node",
+        description:
+          "Assert that the current Android UI Automator hierarchy does or does not contain a matching node.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            device_serial: deviceInputSchema,
+            ...uiNodeFilterInputSchema,
+            should_exist: {
+              type: "boolean",
+              default: true,
+              description: "Set false to assert that no matching node exists",
+            },
+          },
+          anyOf: [
+            { required: ["text"] },
+            { required: ["resource_id"] },
+            { required: ["content_desc"] },
+            { required: ["focused"] },
+          ],
+        },
         annotations: { readOnlyHint: true, openWorldHint: false },
       },
       {
@@ -953,12 +1105,70 @@ export function createAdbMcpServer(
           if (!capabilities.hasUiAutomator) {
             return unsupportedResult("dump_ui", serial, capabilities, "uiautomator");
           }
-          const output = await adb.text(["exec-out", "uiautomator", "dump", "/dev/tty"], {
-            serial,
-            maxOutputBytes: 2 * 1024 * 1024,
-          });
-          const xmlStart = output.indexOf("<?xml");
-          return textResult(xmlStart >= 0 ? output.slice(xmlStart) : output);
+          return textResult(await dumpUiXml(adb, serial));
+        }
+        case "wait_for_ui_node": {
+          const query = parseUiNodeQuery(args);
+          const timeout = boundedInteger(args, "timeout_ms", 0, 30_000, 3_000);
+          const pollInterval = boundedInteger(args, "poll_interval_ms", 50, 1_000, 150);
+          const serial = await resolveDevice(adb, state, optionalString(args, "device_serial"));
+          const capabilities = await deviceCapabilities(adb, serial);
+          if (!capabilities.hasUiAutomator) {
+            return unsupportedResult("wait_for_ui_node", serial, capabilities, "uiautomator");
+          }
+
+          const startedAt = Date.now();
+          while (true) {
+            const node = await findUiNode(adb, serial, query);
+            const elapsedMs = Date.now() - startedAt;
+            if (node) {
+              return textResult(JSON.stringify({ found: true, elapsed_ms: elapsedMs, node }, null, 2));
+            }
+            if (elapsedMs >= timeout) {
+              return textResult(
+                JSON.stringify(
+                  {
+                    found: false,
+                    elapsed_ms: elapsedMs,
+                    message: "No UI node matched before timeout",
+                  },
+                  null,
+                  2
+                )
+              );
+            }
+            await sleep(Math.min(pollInterval, timeout - elapsedMs));
+          }
+        }
+        case "assert_ui_node": {
+          const query = parseUiNodeQuery(args);
+          const shouldExist = optionalBoolean(args, "should_exist") ?? true;
+          const serial = await resolveDevice(adb, state, optionalString(args, "device_serial"));
+          const capabilities = await deviceCapabilities(adb, serial);
+          if (!capabilities.hasUiAutomator) {
+            return unsupportedResult("assert_ui_node", serial, capabilities, "uiautomator");
+          }
+
+          const node = await findUiNode(adb, serial, query);
+          const found = node !== undefined;
+          if (found !== shouldExist) {
+            throw new AdbCommandError(
+              `UI node assertion failed: expected matching node to ${shouldExist ? "exist" : "not exist"}`
+            );
+          }
+
+          return textResult(
+            JSON.stringify(
+              {
+                ok: true,
+                found,
+                should_exist: shouldExist,
+                ...(node ? { node } : {}),
+              },
+              null,
+              2
+            )
+          );
         }
         case "press_key": {
           const serial = await resolveDevice(adb, state, optionalString(args, "device_serial"));

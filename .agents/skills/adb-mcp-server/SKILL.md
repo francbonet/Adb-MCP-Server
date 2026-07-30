@@ -1,6 +1,6 @@
 ---
 name: adb-mcp-server
-description: Use when Codex needs to operate Android emulators, Fire TV, Android TV, APK installs, screenshots, UI dumps, logcat, OBS recording, or configured build profiles through the ADB MCP server.
+description: Use when Codex needs to operate Android emulators, Fire TV, Android TV, APK installs, screenshots, UI waits/assertions, UI dumps, logcat, OBS recording, or configured build profiles through the ADB MCP server.
 ---
 
 # ADB MCP Server
@@ -14,7 +14,7 @@ Use the `adb` MCP server as the source of truth for Android device state and dev
 3. Select the intended device explicitly when more than one ready device is visible.
 4. Before installing APKs from a non-default app repository, call `set_project_root` with the user-confirmed absolute repository path.
 5. Prefer `run_build` with declared build profiles over arbitrary shell build commands.
-6. After install, uninstall, launch, stop, tap, swipe, text input, or key press, verify the result with `screenshot`, `dump_ui`, or `get_current_activity`.
+6. After install, uninstall, launch, stop, tap, swipe, text input, or key press, verify the result with `wait_for_ui_node`, `assert_ui_node`, `screenshot`, `dump_ui`, or `get_current_activity`.
 7. Use `get_logcat` around failures and return focused diagnostic context, not large raw logs.
 8. Use OBS tools only when evidence recording is requested or useful for reproduction.
 
@@ -26,9 +26,9 @@ Use this section to choose the right tool group. Do not memorize or duplicate sc
 - Device context: use `select_device` when the intended target is known, and `clear_active_device` when the session should stop reusing a previous target.
 - Emulator startup: use `start_emulator` when an AVD must be running; use a non-headless emulator when OBS needs to capture the emulator window.
 - Project scoping: use `set_project_root` before installing APKs from the active app repo; this restricts `install_apk` to files under that repo for the session.
-- Screen inspection: use `screenshot` for visual state, `dump_ui` for UI hierarchy when available, and `get_current_activity` for the resumed Android activity.
-- Vega/Kepler: `list_devices` reports detected platform and Android shell utility capabilities. On Vega Virtual Device, `screenshot` can fall back to the configured OBS emulator source when device-side screenshot is unavailable; `dump_ui` and `get_current_activity` may return structured unsupported responses because Android `uiautomator`/`dumpsys` are not present.
-- Remote input: use `press_key` for D-pad, media, back, home, and other key events; use `tap`, `swipe`, and `type_text` for bounded direct input when inspection supports it.
+- Screen inspection: use `wait_for_ui_node` to wait for exact UI Automator node matches after input, `assert_ui_node` to validate the current hierarchy without waiting, `screenshot` for visual state, `dump_ui` for raw UI hierarchy when available, and `get_current_activity` for the resumed Android activity.
+- Vega/Kepler: `list_devices` reports detected platform and Android shell utility capabilities. On Vega Virtual Device, `screenshot` can fall back to the configured OBS emulator source when device-side screenshot is unavailable; `wait_for_ui_node`, `assert_ui_node`, `dump_ui`, and `get_current_activity` may return structured unsupported responses because Android `uiautomator`/`dumpsys` are not present.
+- Remote input: use `press_key` for single D-pad, media, back, home, and other key events; use `press_key_sequence` for bounded multi-key flows with short delays, such as BACK, wait, BACK; use `tap`, `swipe`, and `type_text` for bounded direct input when inspection supports it.
 - APK lifecycle: use `install_apk`, `uninstall_app`, `launch_app`, and `stop_app` for app control, then verify the result with inspection tools.
 - Diagnostics: use `get_logcat` with focused filters, recent line counts, or failure windows instead of returning broad logs. On Vega/Kepler, this may be backed by Vega `loggingctl` rather than Android logcat.
 - Evidence recording: use `get_obs_status`, `open_obs`, `start_obs_recording`, and `stop_obs_recording` only when recording is requested or useful to preserve reproduction evidence. OBS can also provide screenshot fallback for Vega Virtual Device without starting a recording.
@@ -50,7 +50,7 @@ Install an APK from the current app repo:
 2. Call `set_project_root` with that absolute path.
 3. Call `list_devices` and select the intended device if needed.
 4. Call `install_apk` with a relative APK path under the project root.
-5. Verify with `get_current_activity`, `screenshot`, or `dump_ui`.
+5. Verify with `wait_for_ui_node`, `assert_ui_node`, `get_current_activity`, `screenshot`, or `dump_ui`.
 
 Capture a useful failure report:
 
@@ -74,7 +74,7 @@ Run a test automation file:
 2. Call `set_project_root` with the app repository root before any APK install.
 3. Prepare the device: start or select the emulator/device, build/install the APK when requested, and launch the app.
 4. If the test requests video evidence, reproduction evidence, or OBS recording, call `get_obs_status`, then `open_obs` if needed, then `start_obs_recording` before the first user-visible test action.
-5. Execute each test step with the closest MCP tool. Verify after critical actions with `screenshot`, `dump_ui`, or `get_current_activity`.
+5. Execute each test step with the closest MCP tool. Verify after critical actions with `wait_for_ui_node`, `assert_ui_node`, `screenshot`, `dump_ui`, or `get_current_activity`.
 6. On failure, capture a screenshot, current activity, and focused `get_logcat` output before changing app state further.
 7. Stop OBS recording after the final verification step, or immediately after collecting failure evidence when the test cannot continue.
 8. Report pass/fail, device serial, app/package tested, screenshots or OBS output path, failed step if any, and the relevant logcat summary.

@@ -216,8 +216,11 @@ Restart Claude Desktop after saving the file. In a conversation, open the connec
 - `get_device_info`: read device model, Android version, screen size, density, and build info.
 - `screenshot`: capture and optimize a PNG screenshot for agent analysis.
 - `dump_ui`: return UI Automator XML when supported by the target.
+- `wait_for_ui_node`: wait until UI Automator XML contains a node matching exact text, resource ID, content description, and/or focus state.
+- `assert_ui_node`: assert that the current UI Automator XML does or does not contain a matching node.
 - `get_current_activity`: inspect the current resumed activity.
 - `press_key`: send safe remote-control key events, including D-pad.
+- `press_key_sequence`: send a bounded timed sequence of safe key events.
 - `tap`, `swipe`, `type_text`: perform bounded input operations.
 - `install_apk`: install an APK from the configured APK root.
 - `uninstall_app`: uninstall an application by package name, optionally retaining its data.
@@ -236,10 +239,12 @@ The server detects device capabilities before running Android-specific tools. Re
 
 When a Vega/Kepler device is detected, the server uses the Vega CLI backend where Amazon documents an equivalent:
 
-- `press_key`, `tap`, `swipe`, and `type_text` use `inputd-cli` through `vega exec vda -s <serial> shell`.
+- `press_key`, `press_key_sequence`, `tap`, `swipe`, and `type_text` use `inputd-cli` through `vega exec vda -s <serial> shell`.
 - `get_logcat` uses `loggingctl log` through the Vega device shell.
 - `launch_app` uses `vega device launch-app --device <serial> --appName <package>.main`.
 - `screenshot` uses `gwsi-tool-screenshooter` through VDA and then pulls the PNG for optimization. If that device-side backend fails on a Vega Virtual Device, the server falls back to the configured OBS emulator source.
+
+`wait_for_ui_node`, `assert_ui_node`, and `dump_ui` require Android `uiautomator`. On Vega/Kepler targets that do not expose that Android utility, these tools return a structured unsupported response.
 
 Amazon's Vega documentation states that `gwsi-tool-screenshooter` works on physical Vega/Kepler devices and does not work on Vega Virtual Device. For virtual-device screenshots, configure `OBS_EMULATOR_SCENE` and `OBS_EMULATOR_SOURCE` as a reusable OBS window-capture source. The MCP will try to select the window dynamically from the active device serial/model/product/device before requesting the frame. On unsupported targets, and whenever a required Android shell utility is unavailable, the MCP tool returns a structured unsupported response instead of surfacing raw `/bin/sh: command not found` output:
 
@@ -276,6 +281,80 @@ Amazon's Vega documentation states that `gwsi-tool-screenshooter` works on physi
 The operation is idempotent. If the requested AVD is already running, the existing serial is selected and a second instance is not started. In that case a requested cold boot is not performed.
 
 Use `ADB_ALLOWED_AVDS` in shared environments to restrict which AVD names an agent may start.
+
+## UI waits and assertions
+
+Use `wait_for_ui_node` and `assert_ui_node` to verify Android UI state from the UI Automator hierarchy instead of relying on screenshots or OCR. Matching is exact for `text`, `resource_id`, and `content_desc`; `focused` matches a boolean focus state. At least one of those filters is required.
+
+`wait_for_ui_node` polls until a match appears or the timeout expires:
+
+```json
+{
+  "device_serial": "emulator-5554",
+  "text": "All The Channels",
+  "timeout_ms": 3000,
+  "poll_interval_ms": 150
+}
+```
+
+When a match is found, the response includes a summarized node:
+
+```json
+{
+  "found": true,
+  "elapsed_ms": 420,
+  "node": {
+    "text": "All The Channels",
+    "resource_id": "rail-title",
+    "content_desc": "",
+    "class": "android.widget.TextView",
+    "focused": false,
+    "bounds": "[100,210][1920,250]"
+  }
+}
+```
+
+If no node matches before the timeout, the response is non-error JSON with `found: false`.
+
+`assert_ui_node` checks the current hierarchy once and returns an MCP error when the assertion fails:
+
+```json
+{
+  "device_serial": "emulator-5554",
+  "content_desc": "Home",
+  "focused": true
+}
+```
+
+To assert absence, set `should_exist` to `false`:
+
+```json
+{
+  "device_serial": "emulator-5554",
+  "text": "Search page",
+  "should_exist": false
+}
+```
+
+Typical TV navigation flow:
+
+```json
+{
+  "sequence": [
+    { "key": "BACK", "delay_ms_after": 1000 },
+    { "key": "BACK" }
+  ]
+}
+```
+
+Then verify the result:
+
+```json
+{
+  "text": "All The Channels",
+  "timeout_ms": 3000
+}
+```
 
 ## Screenshot optimization
 
