@@ -53,6 +53,11 @@ const KEY_EVENTS = {
 
 type KeyEventName = keyof typeof KEY_EVENTS;
 
+type KeySequenceStep = {
+  key: KeyEventName;
+  delayMsAfter: number;
+};
+
 export interface SessionState {
   activeSerial?: string;
   projectRoot?: string;
@@ -274,6 +279,53 @@ function boundedInteger(
   return value as number;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseKeySequence(args: Record<string, unknown>): KeySequenceStep[] {
+  const value = args.sequence;
+
+  if (!Array.isArray(value) || value.length === 0 || value.length > 20) {
+    throw new AdbCommandError("sequence must contain between 1 and 20 key events");
+  }
+
+  let totalDelay = 0;
+
+  return value.map((entry, index) => {
+    if (!entry || typeof entry !== "object") {
+      throw new AdbCommandError(`sequence[${index}] must be an object`);
+    }
+
+    const step = entry as Record<string, unknown>;
+    const key = step.key;
+
+    if (typeof key !== "string" || !(key in KEY_EVENTS)) {
+      throw new AdbCommandError(
+        `sequence[${index}].key must be one of: ${Object.keys(KEY_EVENTS).join(", ")}`
+      );
+    }
+
+    const delayMsAfter = step.delay_ms_after ?? 0;
+
+    if (
+      !Number.isInteger(delayMsAfter) ||
+      (delayMsAfter as number) < 0 ||
+      (delayMsAfter as number) > 5000
+    ) {
+      throw new AdbCommandError(`sequence[${index}].delay_ms_after must be an integer between 0 and 5000`);
+    }
+
+    totalDelay += delayMsAfter as number;
+
+    if (totalDelay > 15000) {
+      throw new AdbCommandError("Total sequence delay must not exceed 15000 ms");
+    }
+
+    return { key: key as KeyEventName, delayMsAfter: delayMsAfter as number };
+  });
+}
+
 function parseProperties(output: string): Record<string, string> {
   const properties: Record<string, string> = {};
   for (const line of output.split(/\r?\n/)) {
@@ -479,6 +531,42 @@ export function createAdbMcpServer(
             device_serial: deviceInputSchema,
           },
           required: ["key"],
+        },
+        annotations: { readOnlyHint: false, openWorldHint: false },
+      },
+      {
+        name: "press_key_sequence",
+        description:
+          "Send a timed sequence of safe, named Android key events. Use this for gestures requiring precise intervals, such as BACK, wait 1s, BACK.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            device_serial: deviceInputSchema,
+            sequence: {
+              type: "array",
+              minItems: 1,
+              maxItems: 20,
+              items: {
+                type: "object",
+                properties: {
+                  key: {
+                    type: "string",
+                    enum: Object.keys(KEY_EVENTS),
+                    description: "Named remote/key event",
+                  },
+                  delay_ms_after: {
+                    type: "integer",
+                    minimum: 0,
+                    maximum: 5000,
+                    default: 0,
+                    description: "Delay after this key before the next key",
+                  },
+                },
+                required: ["key"],
+              },
+            },
+          },
+          required: ["sequence"],
         },
         annotations: { readOnlyHint: false, openWorldHint: false },
       },
@@ -893,6 +981,52 @@ export function createAdbMcpServer(
             await adb.text(["shell", "input", "keyevent", String(KEY_EVENTS[key])], { serial });
           }
           return textResult(`Pressed ${key} on ${serial}.`);
+        }
+        case "press_key_sequence": {
+          const serial = await resolveDevice(adb, state, optionalString(args, "device_serial"));
+          const sequence = parseKeySequence(args);
+          const capabilities = await deviceCapabilities(adb, serial);
+
+          if (capabilities.platform === "vega") {
+            if (!vegaClient) {
+              return unsupportedResult(
+                "press_key_sequence",
+                serial,
+                capabilities,
+                "vega_cli",
+                "press_key_sequence requires the Vega CLI backend for this Vega/Kepler device."
+              );
+            }
+
+            for (const step of sequence) {
+              await vegaClient.pressKey(serial, step.key);
+              if (step.delayMsAfter > 0) await sleep(step.delayMsAfter);
+            }
+          } else {
+            if (!capabilities.hasInput) {
+              return unsupportedResult("press_key_sequence", serial, capabilities, "input");
+            }
+
+            const remoteCommand = sequence
+              .flatMap((step) => {
+                const commands = [`input keyevent ${KEY_EVENTS[step.key]}`];
+                if (step.delayMsAfter > 0) {
+                  commands.push(`sleep ${(step.delayMsAfter / 1000).toFixed(3)}`);
+                }
+                return commands;
+              })
+              .join("; ");
+
+            await adb.text(["shell", remoteCommand], {
+              serial,
+              timeoutMs: 30_000,
+              maxOutputBytes: 64 * 1024,
+            });
+          }
+
+          return textResult(
+            `Pressed sequence on ${serial}: ${sequence.map((step) => step.key).join(" -> ")}.`
+          );
         }
         case "tap": {
           const serial = await resolveDevice(adb, state, optionalString(args, "device_serial"));
