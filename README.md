@@ -214,7 +214,7 @@ Restart Claude Desktop after saving the file. In a conversation, open the connec
 - `select_device` / `clear_active_device`: set session device context.
 - `set_project_root`: set the user-confirmed repository root for this MCP session.
 - `get_device_info`: read device model, Android version, screen size, density, and build info.
-- `screenshot`: capture and optimize a PNG screenshot for agent analysis.
+- `screenshot`: capture and optimize a PNG screenshot for agent analysis; pass `save_path` to also write that PNG to disk.
 - `dump_ui`: return UI Automator XML when supported by the target.
 - `wait_for_ui_node`: wait until UI Automator XML contains a node matching exact text, resource ID, content description, and/or focus state.
 - `assert_ui_node`: assert that the current UI Automator XML does or does not contain a matching node.
@@ -371,6 +371,16 @@ The tool response reports the original and delivered dimensions and byte sizes. 
 
 The raw ADB capture limit and final optimized-image limit are intentionally separate. A large source PNG can be accepted and then compressed instead of failing before processing.
 
+Pass the optional `save_path` argument to also write the delivered PNG to disk, for example to attach it to a merge request:
+
+```json
+{
+  "save_path": "bug-12/before.png"
+}
+```
+
+`save_path` must end in `.png` and must be inside `ADB_SCREENSHOT_SAVE_ROOT`. Relative paths resolve against that root, parent folders are created, and an existing file is replaced. Paths that escape the root, including through symbolic links, are rejected. The response adds a `Saved: <absolute path>` line. The saved file is the optimized PNG the agent receives, not the raw capture.
+
 ## OBS evidence recording
 
 OBS control uses the WebSocket interface built into OBS Studio 28 and later. Before using the recording tools:
@@ -520,6 +530,7 @@ Environment variables:
 - `ADB_SCREENSHOT_OUTPUT_MAX_BYTES`: maximum optimized PNG size. Defaults to `1048576`.
 - `ADB_SCREENSHOT_MAX_WIDTH`: maximum delivered screenshot width. Defaults to `1280`.
 - `ADB_SCREENSHOT_MAX_HEIGHT`: maximum delivered screenshot height. Defaults to `720`.
+- `ADB_SCREENSHOT_SAVE_ROOT`: directory inside which `screenshot` may write files through `save_path`. Created at startup if missing. Defaults to `<system temp>/adb-mcp-screenshots`.
 - `ANDROID_EMULATOR_EXECUTABLE`: Android Emulator executable. Defaults to `$ANDROID_SDK_ROOT/emulator/emulator`, `$ANDROID_HOME/emulator/emulator`, or `emulator` from `PATH`.
 - `ADB_ALLOWED_AVDS`: optional comma-separated allowlist of AVD names.
 - `OBS_EXECUTABLE`: OBS application name, `.app` path, or executable path. Defaults to `OBS` on macOS and `obs` elsewhere.

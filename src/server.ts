@@ -25,7 +25,7 @@ import {
 import { BuildCommandError, BuildRunner } from "./build.js";
 import { EmulatorManager } from "./emulator.js";
 import { ObsController, ObsTarget } from "./obs.js";
-import { optimizeScreenshot } from "./screenshot.js";
+import { optimizeScreenshot, saveScreenshot } from "./screenshot.js";
 import { VegaClient } from "./vega.js";
 
 const DEVICE_CATALOG_URI = "adb://devices";
@@ -86,6 +86,8 @@ export interface ServerDependencies {
   screenshotOutputMaxBytes: number;
   screenshotMaxWidth: number;
   screenshotMaxHeight: number;
+  /** Real path under which screenshot save_path writes are allowed; omitted disables save_path. */
+  screenshotSaveRoot?: string;
   emulatorManager?: EmulatorManager;
   obsController?: ObsController;
   buildRunner?: BuildRunner;
@@ -459,6 +461,7 @@ export function createAdbMcpServer(
     screenshotOutputMaxBytes,
     screenshotMaxWidth,
     screenshotMaxHeight,
+    screenshotSaveRoot,
     emulatorManager,
     obsController,
     buildRunner,
@@ -612,9 +615,19 @@ export function createAdbMcpServer(
       {
         name: "screenshot",
         description:
-          "Capture the current screen, resize and compress it as an analysis-friendly PNG, and return it directly to the agent.",
-        inputSchema: { type: "object", properties: { device_serial: deviceInputSchema } },
-        annotations: { readOnlyHint: true, openWorldHint: false },
+          "Capture the current screen, resize and compress it as an analysis-friendly PNG, and return it directly to the agent. Pass save_path to also write that PNG to disk, for example to attach it to a merge request.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            device_serial: deviceInputSchema,
+            save_path: {
+              type: "string",
+              description:
+                "Optional .png path, relative to the screenshot save root or absolute inside it, where the delivered PNG is also written. Parent folders are created and an existing file is replaced. The result reports the absolute saved path.",
+            },
+          },
+        },
+        annotations: { readOnlyHint: false, openWorldHint: false },
       },
       {
         name: "get_current_activity",
@@ -1071,6 +1084,14 @@ export function createAdbMcpServer(
             maxWidth: screenshotMaxWidth,
             maxHeight: screenshotMaxHeight,
           });
+          const savePath = optionalString(args, "save_path");
+          let savedTo: string | undefined;
+          if (savePath) {
+            if (!screenshotSaveRoot) {
+              throw new AdbCommandError("save_path is unavailable: this server has no screenshot save root.");
+            }
+            savedTo = await saveScreenshot(optimized.data, savePath, screenshotSaveRoot);
+          }
           return {
             content: [
               {
@@ -1080,6 +1101,7 @@ export function createAdbMcpServer(
                   `Source: ${screenshotSource}.`,
                   `Original: ${optimized.originalWidth}x${optimized.originalHeight}, ${optimized.originalBytes} bytes.`,
                   `Delivered: ${optimized.width}x${optimized.height}, ${optimized.data.length} bytes, PNG palette up to ${optimized.colours} colours.`,
+                  ...(savedTo ? [`Saved: ${savedTo}`] : []),
                 ].join("\n"),
               },
               { type: "image" as const, data: optimized.data.toString("base64"), mimeType: "image/png" },

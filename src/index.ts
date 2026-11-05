@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import path from "node:path";
-import { realpath } from "node:fs/promises";
+import { mkdir, realpath } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { AdbClient } from "./adb.js";
@@ -55,6 +56,10 @@ async function main(): Promise<void> {
   );
   const screenshotMaxWidth = environmentInteger("ADB_SCREENSHOT_MAX_WIDTH", 1280, 320);
   const screenshotMaxHeight = environmentInteger("ADB_SCREENSHOT_MAX_HEIGHT", 720, 180);
+  const screenshotSaveRoot = path.resolve(
+    process.env.ADB_SCREENSHOT_SAVE_ROOT || path.join(tmpdir(), "adb-mcp-screenshots")
+  );
+  await mkdir(screenshotSaveRoot, { recursive: true });
   const timeoutMs = environmentInteger("ADB_TIMEOUT_MS", 30_000, 1_000);
   const maxOutputBytes = environmentInteger("ADB_MAX_OUTPUT_BYTES", 5 * 1024 * 1024, 1024);
   const buildRunner = await maybeCreateBuildRunner(projectRoot);
@@ -84,6 +89,7 @@ async function main(): Promise<void> {
     screenshotOutputMaxBytes,
     screenshotMaxWidth,
     screenshotMaxHeight,
+    screenshotSaveRoot: await realpath(screenshotSaveRoot),
     emulatorManager: new EmulatorManager(emulatorExecutable, adb, allowedAvds),
     obsController: new ObsController({
       websocketUrl: process.env.OBS_WEBSOCKET_URL || "ws://127.0.0.1:4455",

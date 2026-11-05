@@ -1,3 +1,5 @@
+import { lstat, mkdir, realpath, writeFile } from "node:fs/promises";
+import path from "node:path";
 import sharp from "sharp";
 
 export interface ScreenshotOptimizationOptions {
@@ -88,4 +90,37 @@ export async function optimizeScreenshot(
   throw new Error(
     `Unable to optimize screenshot below ${options.maxBytes} bytes without reducing it below 320x180`
   );
+}
+
+function isWithin(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return !relative.startsWith("..") && !path.isAbsolute(relative);
+}
+
+/**
+ * Write a screenshot PNG inside the save root and return its real path.
+ * Relative paths resolve against the root, parent folders are created, and an existing regular file is replaced.
+ */
+export async function saveScreenshot(data: Buffer, savePath: string, saveRoot: string): Promise<string> {
+  const root = await realpath(saveRoot);
+  const target = path.resolve(root, savePath);
+  if (path.extname(target).toLowerCase() !== ".png") {
+    throw new Error("save_path must end in .png");
+  }
+  if (!isWithin(root, target)) {
+    throw new Error(`save_path must be inside the screenshot save root: ${root}`);
+  }
+  await mkdir(path.dirname(target), { recursive: true });
+  // Re-check after resolving symlinks so a linked folder cannot escape the root.
+  const parent = await realpath(path.dirname(target));
+  if (!isWithin(root, parent)) {
+    throw new Error(`save_path must be inside the screenshot save root: ${root}`);
+  }
+  const file = path.join(parent, path.basename(target));
+  const existing = await lstat(file).catch(() => undefined);
+  if (existing && !existing.isFile()) {
+    throw new Error(`save_path exists and is not a regular file: ${file}`);
+  }
+  await writeFile(file, data);
+  return file;
 }
