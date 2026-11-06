@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import sharp from "sharp";
 import { AdbClient, CommandRunner } from "./adb.js";
-import { createAdbMcpServer } from "./server.js";
+import { createAdbMcpServer, ServerDependencies } from "./server.js";
+import { VegaClient } from "./vega.js";
+import { SCREEN_RECORDING_DENIED_MESSAGE, VvdCaptureError } from "./vvdCapture.js";
 
 type ToolResult = {
   content: Array<{ type: "text"; text: string }>;
@@ -288,4 +291,88 @@ test("press_key_sequence rejects excessive total delay", async () => {
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /Total sequence delay must not exceed 15000 ms/);
   assert.deepEqual(calls, [["devices", "-l"]]);
+});
+
+function vvdScreenshotServer(overrides: Partial<ServerDependencies>, vegaCalls: string[][]) {
+  return createAdbMcpServer({
+    adb: new AdbClient({ runner: vegaRunner() }),
+    apkRoot: process.cwd(),
+    screenshotMaxBytes: 1024 * 1024,
+    screenshotOutputMaxBytes: 1024 * 1024,
+    screenshotMaxWidth: 1280,
+    screenshotMaxHeight: 720,
+    vegaClient: new VegaClient({
+      runner: async (_executable, args) => {
+        vegaCalls.push([...args]);
+        return missing();
+      },
+    }),
+    ...overrides,
+  });
+}
+
+test("screenshot captures the Vega Virtual Device window on macOS without gwsi-tool-screenshooter", async () => {
+  const vegaCalls: string[][] = [];
+  const captured: string[] = [];
+  const png = await sharp({ create: { width: 1920, height: 1080, channels: 3, background: "#ff0000" } })
+    .png()
+    .toBuffer();
+  const server = vvdScreenshotServer(
+    {
+      hostPlatform: "darwin",
+      vvdScreenCapture: async (serial) => {
+        captured.push(serial);
+        return png;
+      },
+    },
+    vegaCalls
+  );
+
+  const result = await callTool(server, "screenshot", { device_serial: "emulator-5554" });
+
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(captured, ["emulator-5554"]);
+  assert.match(result.content[0].text, /Source: VVD window capture\./);
+  assert.match(result.content[0].text, /Original: 1920x1080/);
+  assert.deepEqual(vegaCalls, []);
+});
+
+test("screenshot reports the VVD capture error when OBS is not configured", async () => {
+  const vegaCalls: string[][] = [];
+  const server = vvdScreenshotServer(
+    {
+      hostPlatform: "darwin",
+      vvdScreenCapture: async () => {
+        throw new VvdCaptureError(SCREEN_RECORDING_DENIED_MESSAGE);
+      },
+    },
+    vegaCalls
+  );
+
+  const result = await callTool(server, "screenshot", { device_serial: "emulator-5554" });
+  const payload = JSON.parse(result.content[0].text) as Record<string, unknown>;
+
+  assert.equal(result.isError, true);
+  assert.equal(payload.reason, "unsupported");
+  assert.equal(payload.missing_capability, "vvd_window_capture");
+  assert.equal(payload.message, SCREEN_RECORDING_DENIED_MESSAGE);
+  assert.deepEqual(vegaCalls, []);
+});
+
+test("screenshot keeps the Vega CLI backend outside macOS", async () => {
+  const vegaCalls: string[][] = [];
+  const server = vvdScreenshotServer(
+    {
+      hostPlatform: "linux",
+      vvdScreenCapture: async () => assert.fail("VVD window capture is macOS only"),
+    },
+    vegaCalls
+  );
+
+  const result = await callTool(server, "screenshot", { device_serial: "emulator-5554" });
+  const payload = JSON.parse(result.content[0].text) as Record<string, unknown>;
+
+  assert.equal(result.isError, true);
+  assert.equal(payload.missing_capability, "gwsi-tool-screenshooter");
+  assert.ok(vegaCalls.some((args) => args.includes("gwsi-tool-screenshooter")));
 });

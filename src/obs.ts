@@ -58,6 +58,11 @@ function delay(milliseconds: number): Promise<void> {
 export class ObsController {
   constructor(private readonly options: ObsControllerOptions) {}
 
+  /** Whether a scene/source mapping exists for the target, i.e. whether OBS capture can be attempted. */
+  isConfigured(target: ObsTarget): boolean {
+    return Boolean(target === "emulator" ? this.options.emulator : this.options.physicalDevice);
+  }
+
   private mapping(target: ObsTarget): ObsSourceMapping {
     const mapping = target === "emulator" ? this.options.emulator : this.options.physicalDevice;
     if (!mapping) {

@@ -27,6 +27,7 @@ import { EmulatorManager } from "./emulator.js";
 import { ObsController, ObsTarget } from "./obs.js";
 import { optimizeScreenshot, saveScreenshot } from "./screenshot.js";
 import { VegaClient } from "./vega.js";
+import { captureVvdScreen } from "./vvdCapture.js";
 
 const DEVICE_CATALOG_URI = "adb://devices";
 const KEY_EVENTS = {
@@ -92,6 +93,10 @@ export interface ServerDependencies {
   obsController?: ObsController;
   buildRunner?: BuildRunner;
   vegaClient?: VegaClient;
+  /** Host-side Vega Virtual Device screen capture; defaults to macOS window capture. */
+  vvdScreenCapture?: (serial: string, maxBytes: number) => Promise<Buffer>;
+  /** Host operating system; defaults to process.platform. */
+  hostPlatform?: NodeJS.Platform;
 }
 
 function textResult(text: string, isError = false) {
@@ -466,6 +471,8 @@ export function createAdbMcpServer(
     obsController,
     buildRunner,
     vegaClient,
+    vvdScreenCapture = (serial: string, maxBytes: number) => captureVvdScreen(serial, { maxBytes }),
+    hostPlatform = process.platform,
   } = dependencies;
   const server = new Server(
     { name: "adb-mcp-server", version: "0.1.0" },
@@ -1035,7 +1042,40 @@ export function createAdbMcpServer(
           const capabilities = await deviceCapabilities(adb, serial);
           let screenshotData: Buffer;
           let screenshotSource = "device";
-          if (capabilities.platform === "vega") {
+          const captureObsEmulatorScreenshot = async (obs: ObsController) => {
+            const obsScreenshot = await obs.captureScreenshot("emulator", {
+              windowMatchTerms: await obsWindowMatchTerms(adb, serial),
+              launchIfNeeded: true,
+              timeoutMs: 30_000,
+              width: screenshotMaxWidth,
+              height: screenshotMaxHeight,
+            });
+            return { data: obsScreenshot.data, source: `OBS source ${obsScreenshot.sourceName}` };
+          };
+          if (capabilities.platform === "vega" && hostPlatform === "darwin" && serial.startsWith("emulator-")) {
+            // Vega Virtual Device: device-side screenshot tools do not work, so capture its macOS window.
+            try {
+              screenshotData = await vvdScreenCapture(serial, screenshotMaxBytes);
+              screenshotSource = "VVD window capture";
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              if (!obsController?.isConfigured("emulator")) {
+                return unsupportedResult("screenshot", serial, capabilities, "vvd_window_capture", message);
+              }
+              try {
+                ({ data: screenshotData, source: screenshotSource } = await captureObsEmulatorScreenshot(obsController));
+              } catch (obsError) {
+                const obsMessage = obsError instanceof Error ? obsError.message : String(obsError);
+                return unsupportedResult(
+                  "screenshot",
+                  serial,
+                  capabilities,
+                  "obs_screenshot",
+                  `${message} OBS fallback also failed: ${obsMessage}`
+                );
+              }
+            }
+          } else if (capabilities.platform === "vega") {
             if (!vegaClient) {
               return unsupportedResult(
                 "screenshot",
@@ -1050,15 +1090,7 @@ export function createAdbMcpServer(
             } catch (error) {
               if (obsController && serial.startsWith("emulator-")) {
                 try {
-                  const obsScreenshot = await obsController.captureScreenshot("emulator", {
-                    windowMatchTerms: await obsWindowMatchTerms(adb, serial),
-                    launchIfNeeded: true,
-                    timeoutMs: 30_000,
-                    width: screenshotMaxWidth,
-                    height: screenshotMaxHeight,
-                  });
-                  screenshotData = obsScreenshot.data;
-                  screenshotSource = `OBS source ${obsScreenshot.sourceName}`;
+                  ({ data: screenshotData, source: screenshotSource } = await captureObsEmulatorScreenshot(obsController));
                 } catch (obsError) {
                   const message = obsError instanceof Error ? obsError.message : String(obsError);
                   return unsupportedResult("screenshot", serial, capabilities, "obs_screenshot", message);
