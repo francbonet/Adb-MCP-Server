@@ -111,3 +111,29 @@ test("listDevicesWithCapabilities handles mixed Android and Vega devices", async
     ]
   );
 });
+
+test("detectCapabilities identifies a Vega Virtual Device without product/model through inputd-cli", async () => {
+  const adb = new AdbClient({
+    runner: capabilityRunner("List of devices attached\nemulator-5556 device transport_id:4\n", {
+      "emulator-5556": new Set(["inputd-cli"]),
+    }),
+  });
+
+  const capabilities = await adb.detectCapabilities("emulator-5556");
+
+  assert.equal(capabilities.platform, "vega");
+  assert.equal(capabilities.hasGetprop, false);
+  assert.equal(capabilities.hasInput, false);
+});
+
+test("detectCapabilities keeps a bare device without known tools as unknown", async () => {
+  const adb = new AdbClient({
+    runner: capabilityRunner("List of devices attached\nemulator-5556 device transport_id:4\n", {
+      "emulator-5556": new Set(),
+    }),
+  });
+
+  const capabilities = await adb.detectCapabilities("emulator-5556");
+
+  assert.equal(capabilities.platform, "unknown");
+});

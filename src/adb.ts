@@ -309,24 +309,21 @@ export class AdbClient {
     }
 
     const entries = await Promise.all(
-      Object.entries(COMMAND_CAPABILITIES).map(async ([key, command]) => {
-        const result = await this.runRaw(["shell", "command", "-v", command], {
-          serial: safeSerial,
-          timeoutMs: 5_000,
-          maxOutputBytes: 16 * 1024,
-        });
-        return [key, result.exitCode === 0 && Boolean(result.stdout.toString("utf8").trim())] as const;
-      })
+      Object.entries(COMMAND_CAPABILITIES).map(
+        async ([key, command]) => [key, await this.hasShellCommand(safeSerial, command)] as const
+      )
     );
     const detected = Object.fromEntries(entries) as Omit<DeviceCapabilities, "platform">;
     const propertyOutput = detected.hasGetprop
       ? await this.readPropertiesForDetection(safeSerial)
       : "";
+    // Vega Virtual Device (SDK 0.24+) reports no product/model and has no getprop; its shell exposes inputd-cli.
+    const hasVegaShell = detected.hasGetprop ? false : await this.hasShellCommand(safeSerial, "inputd-cli");
     const deviceForDetection =
       device ?? (await this.listDevices()).find((candidate) => candidate.serial === safeSerial);
     const capabilities: DeviceCapabilities = {
       ...detected,
-      platform: inferPlatform(deviceForDetection, propertyOutput, detected),
+      platform: inferPlatform(deviceForDetection, propertyOutput, detected, hasVegaShell),
     };
     this.capabilitiesCache.set(safeSerial, capabilities);
     return capabilities;
@@ -338,6 +335,15 @@ export class AdbClient {
 
   async disconnect(target: string): Promise<string> {
     return this.text(["disconnect", assertNetworkTarget(target)]);
+  }
+
+  private async hasShellCommand(serial: string, command: string): Promise<boolean> {
+    const result = await this.runRaw(["shell", "command", "-v", command], {
+      serial,
+      timeoutMs: 5_000,
+      maxOutputBytes: 16 * 1024,
+    });
+    return result.exitCode === 0 && Boolean(result.stdout.toString("utf8").trim());
   }
 
   private async readPropertiesForDetection(serial: string): Promise<string> {
@@ -368,7 +374,8 @@ function unavailableCapabilities(platform: DevicePlatform): DeviceCapabilities {
 function inferPlatform(
   device: AdbDevice | undefined,
   propertyOutput: string,
-  capabilities: Omit<DeviceCapabilities, "platform">
+  capabilities: Omit<DeviceCapabilities, "platform">,
+  hasVegaShell = false
 ): DevicePlatform {
   const detailText = [
     device?.serial,
@@ -382,6 +389,7 @@ function inferPlatform(
     .toLowerCase();
 
   if (/\b(?:vega|kepler)\b/.test(detailText)) return "vega";
+  if (hasVegaShell && !capabilities.hasGetprop) return "vega";
   if (
     detailText.includes("virtualdevice") &&
     !capabilities.hasDumpsys &&
