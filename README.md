@@ -242,11 +242,13 @@ When a Vega/Kepler device is detected, the server uses the Vega CLI backend wher
 - `press_key`, `press_key_sequence`, `tap`, `swipe`, and `type_text` use `inputd-cli` through `vega exec vda -s <serial> shell`.
 - `get_logcat` uses `loggingctl log` through the Vega device shell.
 - `launch_app` uses `vega device launch-app --device <serial> --appName <package>.main`.
-- `screenshot` uses `gwsi-tool-screenshooter` through VDA and then pulls the PNG for optimization. If that device-side backend fails on a Vega Virtual Device, the server falls back to the configured OBS emulator source.
+- `screenshot` uses `gwsi-tool-screenshooter` through VDA on physical Vega/Kepler devices and then pulls the PNG for optimization. On a Vega Virtual Device under macOS it captures the VVD window instead; see [Vega Virtual Device](#vega-virtual-device-vvd).
 
 `wait_for_ui_node`, `assert_ui_node`, and `dump_ui` require Android `uiautomator`. On Vega/Kepler targets that do not expose that Android utility, these tools return a structured unsupported response.
 
-Amazon's Vega documentation states that `gwsi-tool-screenshooter` works on physical Vega/Kepler devices and does not work on Vega Virtual Device. For virtual-device screenshots, configure `OBS_EMULATOR_SCENE` and `OBS_EMULATOR_SOURCE` as a reusable OBS window-capture source. The MCP will try to select the window dynamically from the active device serial/model/product/device before requesting the frame. On unsupported targets, and whenever a required Android shell utility is unavailable, the MCP tool returns a structured unsupported response instead of surfacing raw `/bin/sh: command not found` output:
+The Vega CLI backends run through `vega`, so set `VEGA_EXECUTABLE` to the absolute path of the Vega CLI (for example `/Users/<you>/vega/bin/vega`) in the MCP server's `env` when `vega` is not on the `PATH` of the app that launches the server. GUI apps such as Claude Desktop usually do not inherit your shell `PATH`.
+
+On unsupported targets, and whenever a required Android shell utility is unavailable, the MCP tool returns a structured unsupported response instead of surfacing raw `/bin/sh: command not found` output:
 
 ```json
 {
@@ -258,6 +260,25 @@ Amazon's Vega documentation states that `gwsi-tool-screenshooter` works on physi
   "missing_capability": "uiautomator"
 }
 ```
+
+### Vega Virtual Device (VVD)
+
+The Vega Virtual Device from Vega SDK 0.24 appears in `adb devices -l` as a bare emulator serial, for example `emulator-5556 device transport_id:4`, without the `model:VirtualDevice` detail that older SDKs reported. Its shell has no `getprop` but provides `inputd-cli`, so the server classifies a device as `vega` when `getprop` is missing and `inputd-cli` is present. Input, logs, and app launch then use the Vega CLI backends above.
+
+Device-side screenshots do not work on the VVD: Amazon documents `gwsi-tool-screenshooter` as unsupported there, `screenshooter` cannot write its buffer file, and QEMU `screendump` returns a black frame because the picture is rendered on the GPU. On macOS the `screenshot` tool therefore captures the VVD window on the host:
+
+1. It finds the `vega-virtual-device` process started with `-ports <port>,...` for the `emulator-<port>` serial.
+2. It looks up that process's on-screen window and captures it with `screencapture -x -o -l <window id>`.
+3. It reads the skin `layout` file from the process's `-skindir` and `-skin` arguments and crops the capture to the TV display, removing the window title bar and the on-screen remote control. If the layout cannot be read, the uncropped window is returned.
+
+The result reports `Source: VVD window capture.` and is then optimized and saved through `save_path` like any other screenshot. `gwsi-tool-screenshooter` is not called for the VVD.
+
+Requirements:
+
+- **Screen Recording permission.** macOS only allows window capture for apps that have Screen Recording access. Grant it to the app that launches this MCP server (for example Claude Desktop, your terminal, or your IDE) in System Settings → Privacy & Security → Screen & System Audio Recording, then restart that app. Without it, `screenshot` returns an unsupported response that says so.
+- **A visible VVD window.** The window must be on screen on the current Space. A minimized window, or one on another Space, cannot be captured, and the response says so. Other windows may overlap it.
+
+If the window capture fails and `OBS_EMULATOR_SCENE` / `OBS_EMULATOR_SOURCE` are configured, the server falls back to an OBS frame; otherwise it returns the capture error as a structured unsupported response. Physical Vega/Kepler devices, and VVDs on hosts other than macOS, keep using `gwsi-tool-screenshooter` with the existing OBS fallback for emulator serials.
 
 ## Android emulators
 
@@ -358,7 +379,7 @@ Then verify the result:
 
 ## Screenshot optimization
 
-The `screenshot` tool captures a raw PNG with `adb exec-out screencap -p` on Android devices, or the Vega screenshot backend on supported physical Vega/Kepler devices, then processes it before returning it to the agent. By default it:
+The `screenshot` tool captures a raw PNG with `adb exec-out screencap -p` on Android devices, the Vega screenshot backend on supported physical Vega/Kepler devices, or the macOS window capture of a Vega Virtual Device, then processes it before returning it to the agent. By default it:
 
 - Fits the image inside `1280x720` without enlarging smaller screenshots.
 - Uses an indexed PNG palette with up to 256 colours.
@@ -439,7 +460,7 @@ ADB itself is not an OBS video source. Protected DRM/HDCP content may appear bla
 
 `open_obs` starts OBS when necessary and waits for WebSocket to become ready. `start_obs_recording` is idempotent when OBS is already recording the configured scene; it refuses to switch scenes during a different active recording. `stop_obs_recording` finalizes the recording and returns the path reported by OBS.
 
-The `screenshot` tool can also use the configured `OBS_EMULATOR_SCENE` / `OBS_EMULATOR_SOURCE` as a host-side fallback for Vega Virtual Device screenshots. This requests a single PNG frame through OBS WebSocket and does not start recording. The source should be a reusable window/application capture input; the MCP attempts to point it at the active emulator window using the selected device serial and ADB details.
+The `screenshot` tool can also use the configured `OBS_EMULATOR_SCENE` / `OBS_EMULATOR_SOURCE` as a host-side fallback for Vega Virtual Device screenshots when the built-in macOS window capture fails or the host is not macOS. This requests a single PNG frame through OBS WebSocket and does not start recording. The source should be a reusable window/application capture input; the MCP attempts to point it at the active emulator window using the selected device serial and ADB details.
 
 ## Installing and uninstalling applications
 
@@ -520,13 +541,13 @@ Example:
 Environment variables:
 
 - `ADB_EXECUTABLE`: ADB executable path. Defaults to `adb`.
-- `VEGA_EXECUTABLE`: Vega CLI executable path used for Vega/Kepler backends. Defaults to `vega`.
+- `VEGA_EXECUTABLE`: Vega CLI executable path used for Vega/Kepler backends (input, logs, app launch, and physical-device screenshots). Defaults to `vega` from `PATH`; set an absolute path such as `/Users/<you>/vega/bin/vega` when the launching app does not have the Vega SDK on its `PATH`.
 - `ADB_PROJECT_ROOT`: project root used for default config and APK root. Defaults to the server working directory.
 - `ADB_APK_ROOT`: directory from which APK installation is allowed. Defaults to `ADB_PROJECT_ROOT`.
 - `ADB_BUILD_CONFIG`: path to build profile JSON. Defaults to `adb-mcp.config.json` in the server working directory when present.
 - `ADB_TIMEOUT_MS`: default ADB command timeout. Defaults to `30000`.
 - `ADB_MAX_OUTPUT_BYTES`: default ADB output limit. Defaults to `5242880`.
-- `ADB_SCREENSHOT_MAX_BYTES`: maximum raw PNG size accepted from `adb screencap`. Defaults to `33554432`, allowing 4K captures to be processed before applying the smaller delivery limit.
+- `ADB_SCREENSHOT_MAX_BYTES`: maximum raw PNG size accepted from `adb screencap`, the Vega backend, or the VVD window capture. Defaults to `33554432`, allowing 4K captures to be processed before applying the smaller delivery limit.
 - `ADB_SCREENSHOT_OUTPUT_MAX_BYTES`: maximum optimized PNG size. Defaults to `1048576`.
 - `ADB_SCREENSHOT_MAX_WIDTH`: maximum delivered screenshot width. Defaults to `1280`.
 - `ADB_SCREENSHOT_MAX_HEIGHT`: maximum delivered screenshot height. Defaults to `720`.
